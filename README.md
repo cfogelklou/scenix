@@ -2,7 +2,7 @@
 
 Scenix Semiconductor was founded in 1996 and subsequently renamed Ubicom before being bought by Qualcomm (so, it survived the .com crash.)
 
-The founder and former CEO of Scenix Semiconductor was tragically murdered on a trip to China not long after a new CEO was named to grow the company from startup stage enterprise.
+The founder and former CEO of Scenix Semiconductor was tragically murdered on a trip to China not long after a new CEO was named to grow the company from startup stage to enterprise.
 
 ## Archived Virtual Peripherals and Datasheets
 
@@ -10,7 +10,7 @@ Very little information is available today about the company, so this is my cont
 
 ## What was a Virtual Peripheral?
 
-The Scenix/Ubicom processors were fast (for the time) RISC processors with 100% deterministic interrupt latencies and execution times. This determinism meant that actions such as pin toggles/pin samples could be exactly timed to the clock cycle - enabling many sourts of "peripherals" to run in a periodic, clock-driven Interrupt Service Routine.  Motor Control, UARTs, ADCs, DACs, I2S, SPI, etc could be run "in parallel" by VP state machines running in the processor.
+The Scenix/Ubicom processors were fast (for the time) RISC processors with 100% deterministic interrupt latencies and execution times. This determinism meant that actions such as pin toggles/pin samples could be exactly timed to the clock cycle - enabling many "virtual peripherals" to run in a periodic, clock-driven Interrupt Service Routine (ISR).  Motor Control, UARTs, ADCs, DACs, I2S, SPI, etc could be run "in parallel" by VP state machines running in the processor.  Typically, the ISR was run at a multiple of a standard baud rate, allowing for PC communications via terminal while also driving "period independent" peripherals such as I2C, SPI, ADC, etc.
 
 ## What could you do with Virtual Peripherals?
 
@@ -27,3 +27,5 @@ We also demonstrated a DTMF-Detecting robot at a CES show.  The tank-treaded rob
 Another example was a V.23 modem. Yes, V.23 is an ancient technology, but the A/D and D/A for the modem was 100% bit-banged in VP's of an SX-28. The target customer was, for example, vending machine companies who wanted a cheap way for their vending machines to dial a central server and let the server know that they were low on Cheetos.
 
 ### Many more examples are available in the [application_notes](application_notes) subdirectory
+
+The repository folder contains source code and pdf files, and the application_notes directory contains PDFs previously published by Scenix/Ubicom.
