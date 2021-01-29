@@ -1,0 +1,92 @@
+;********************************************************************************
+;  IrDA Project
+;********************************************************************************
+
+	device	pins28, pages4, banks8, oschs
+	device	turbo, stackx, optionx
+	id	'IrDA'
+	reset	Startup
+	freq	50000000
+
+;********** General **********
+
+pcall	MACRO	1				;Call across a page boundry
+	page	\1				;Words:2 Cycles:4 Affects:PC
+	call	\1
+	ENDM
+
+pjmp	MACRO	1				;Jump across a page boundry
+	page	\1				;Words:2 Cycles:4 Affects:PC
+	jmp	\1
+	ENDM
+
+;********** Mode Constants **********
+
+TRIS		=	$0F
+PLP		=	$0E
+LVL		=	$0D
+ST		=	$0C
+WKEN		=	$0B
+WKED		=	$0A
+WKPND		=	$09
+COMP		=	$08
+
+IsrStatus	=	$0C			;Global ISR status register
+DebugData	=	$0D			;Debug data to be sent out the debug port
+Temp		=	$0E			;2 bytes of tempory storage
+
+PhysicalDataTx	=	0			;Shows all transmitted bytes to IR medium
+PhysicalDataRx	=	0			;Shows all received bytes from IR medium
+PayloadDataTx	=	0			;Shows all payload data bytes transmitted followed by ^ when frame is complete
+PayloadDataRx	=	0			;Shows all payload data bytes received followed by ^ or ! for pass/fail when frame is complete
+PayloadInfo	=	0			;Filters address and shows I, S, or U based on command type
+IFrameDataTx	=	0			;Shows all I frame data bytes transmitted followed by ^ or ! for ack/!ack
+IFrameDataRx	=	0			;Shows all I frame data bytes received followed by ^ or ! for ack/!ack
+
+ShowXIDInfo	=	1
+ShowConnect	=	1
+
+	IsrDataSeg
+	FrameDataSeg
+	PayloadDataSeg
+	LapDataSeg
+	LmpDataSeg
+	
+	org		$0000
+
+	IsrCodeSeg
+	MainCodeSeg
+	FrameCodeSeg
+	LmpRxStringSeg
+
+	org		$0200
+
+	LapCodeSeg
+	PayloadString3
+
+	org		$0400
+
+	PayloadCodeSeg
+	PayloadString1
+	PayloadString2
+
+	org		$0600
+
+; ====================================================================
+; Application Code
+; 
+; Uncomment the following lines for the three different applications.
+;
+; SX to PC communications (IrComm):
+;	AppCommSX2PCCodeSeg
+;
+; Transparent data transfer. PC to PC. (IrComm):
+;	AppCommTransCodeSeg
+;
+; SX to SX communications:
+	AppSX2SXCodeSeg
+;
+; ====================================================================
+
+	LmpCodeSeg
+	LmpTxStringSeg

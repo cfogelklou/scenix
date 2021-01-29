@@ -1,0 +1,733 @@
+;******************************************************************************
+; Copyright © [01/07/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+ ;Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;	This program demonstrates the use of DTMF detection.
+;	
+;
+;       Length: 
+;       Authors: Chris Fogelklou and Stephen Holland,
+;                Scenix Semiconductor Inc.
+;       Written: 99/01/07
+;	Version: 2.0
+;		 This version uses the same modified Goertzel algorithm which
+;		 was used in the previous version of DTMF detection code, but 
+;		 it attempts to make it far more accurate.
+;		 It will not start checking for a DTMF tone until it detects some 
+;		 time of signal on the line.  At this point, it runs the DTMF detectors
+;		 for a good 45ms, after which it checks for any good values in the DTMF 
+;		 result registers.  The key difference in operation between this
+;		 version of DTMF code and the last is that the generated reference
+;		 waves are very accurate, and that some of the processing is done
+;		 in the mainline code, to handle the increased horsepower demands
+;		 presented by the new algorithm.
+;******************************************************************************
+		device	pins28,pages4,banks8,oschs,turbo,optionx,stackx
+		freq	50_000_000
+		ID	'DTMF2.0'
+
+		reset	start
+;**************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;**************************************************************************
+		watch	pulse_index,8,uhex
+		watch	indf,8,uhex
+		watch	mask,8,ubin
+
+		watch	dft_index,8,uhex
+		watch	dft_mask,8,ubin
+		watch	sin_result_1,8,sdec
+		watch	cos_result_1,8,sdec
+		watch	sin_result_2,8,sdec
+		watch	cos_result_2,8,sdec
+		watch	sin_result_3,8,sdec
+		watch	cos_result_3,8,sdec
+		watch	sin_result_4,8,sdec
+		watch	cos_result_4,8,sdec
+		watch	sin_result_5,8,sdec
+		watch	cos_result_5,8,sdec
+		watch	sin_result_6,8,sdec
+		watch	cos_result_6,8,sdec
+		watch	sin_result_7,8,sdec
+		watch	cos_result_7,8,sdec
+		watch	sin_result_8,8,sdec
+		watch	cos_result_8,8,sdec
+		watch	dtmf_count_l,8,uhex
+		watch	dtmf_count_h,8,uhex
+		watch	sin_waves,8,ubin
+		watch	dtmf_input,8,ubin
+		watch	high_score,8,udec
+		watch	winner,8,udec
+		watch	contender,8,udec
+		watch	last_high,8,udec
+		watch	last_digit,1,fstr
+
+
+
+
+;**************************************************************************
+; Equates for certain baud rates: 19200 baud
+;**************************************************************************
+baud_bit	=       4                       ;for 19200 baud
+start_delay	=       16+8+1                  ; "    "     "
+int_period	=       163                     ; "    "     "
+
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+PWM_pin		equ	ra.0
+rx_pin		equ	ra.1
+tx_pin		equ	ra.2
+in_out		equ	ra.3
+
+led_pin		equ	rb.0
+hook		equ	rb.4
+
+;**************************************************************************
+; Global Variables
+;**************************************************************************
+		org	$8		; Global registers
+
+temp			ds	1	; Temporary storage register
+flags			ds	1	; Flags register
+	dtmf_det_en		equ	flags.0	; This bit determines if dtmf is enabled
+	dtmf_det_done		equ	flags.1 ; This bit gets set when the dtmf detection is done.
+	dtmf_digit_received	equ	flags.2	; This bit gets set when a digit is received by DTMF
+
+isr_temp		ds	1	; Temporary storage register for use by
+					; the interrupt service routine.
+pulse_index		ds	1
+mask			ds	1
+fsr_backup		ds	1
+dft_mask		ds	1
+dft_index		ds	1
+
+rx_flag		=	flags.0		; Signifies a bit recieved via. RS-232
+dtmf_rcv_en	=	flags.1 	; Enables DTMF detection
+timer_flag	=	flags.2		; Flags a rollover of the timers.
+
+;*************************************************************
+; Bank 1 variables
+;*************************************************************
+		org	$10
+
+
+;*************************************************************
+; Bank 2 variables
+;*************************************************************
+		org     $30                   	;bank3 variables
+timers		=	$
+timer_l		ds	1
+timer_h		ds	1
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+string		ds	1
+byte		ds	1
+
+;*************************************************************
+; Bank 3 variables
+;*************************************************************
+		org	$50
+
+dtmf_det1	=	$
+
+dtmf_mask	ds	1	; This register is used to perform bitwise operations on
+				; the sin/cos_waves registers
+sin_cos_mask	ds	1	; This register is used to determine whether sin or cos should
+				; be performed for the sin/cos wave selected by dtmf_mask
+sin_waves	ds	1	; This register holds the current state of all 8 sin waves.
+cos_waves	ds	1	; This register holds the current state of all 8 cos waves
+dtmf_input	ds	1	; This is a temporary register used to compare the input wave with
+				; the sin/cos reference
+dtmf_count_h	ds	1	; This counter is incremented every interrupt.  It is used to time out the
+dtmf_count_l	ds	1	;  dtmf detectors
+bank_index	ds	1	; Index into sin_cos_bank to clear the bank.
+last_high	ds	1	; The last high frequency to win
+last_low	ds	1	; The last low frequency to win
+last_digit	ds	1	; The last digit to win
+this_digit	ds	1	; The digit we just got.
+high_score	ds	1	; When scanning results, the current high score
+winner		ds	1	; The owner of the high score.
+contender	ds	1	; The value of the current contender
+dtmf_det_flags	ds	1	; Flags for DTMF.
+	same_digit_counter equ	dtmf_det_flags.0 ; Once two identical digits are received, set this flag. 
+	already_sent       equ	dtmf_det_flags.1
+;*************************************************************
+; Bank 4 variables
+;*************************************************************
+		org	$70	
+square_wave	=	$
+
+square_acc_low	ds	16
+
+
+;*************************************************************
+; Bank 5 variables
+;*************************************************************
+		org	$90	
+
+sin_cos_bank	=	$
+
+sin_result_1	ds	1
+cos_result_1	ds	1
+sin_result_2	ds	1
+cos_result_2	ds	1
+sin_result_3	ds	1
+cos_result_3	ds	1
+sin_result_4	ds	1
+cos_result_4	ds	1
+sin_result_5	ds	1
+cos_result_5	ds	1
+sin_result_6	ds	1
+cos_result_6	ds	1
+sin_result_7	ds	1
+cos_result_7	ds	1
+sin_result_8	ds	1
+cos_result_8	ds	1
+
+;*************************************************************
+; Bank 6 variables
+;*************************************************************
+		org	$b0	
+;**************************************************************************
+; Equates for common data comm frequencies (Square wave generator (DTMF Detect)
+;**************************************************************************
+f697_h		equ	$12	; DTMF Frequency
+f697_l		equ	$9d
+
+f770_h		equ	$14	; DTMF Frequency
+f770_l		equ	$90
+
+f852_h		equ	$16	; DTMF Frequency
+f852_l		equ	$c0
+
+f941_h		equ	$19	; DTMF Frequency
+f941_l		equ	$21
+
+f1209_h		equ	$20	; DTMF Frequency
+f1209_l		equ	$49
+
+f1336_h		equ	$23	; DTMF Frequency
+f1336_l		equ	$ad
+
+f1477_h		equ	$27	; DTMF Frequency
+f1477_l		equ	$71
+
+f1633_h		equ	$2b	; DTMF Frequency
+f1633_l		equ	$9c
+
+;**************************************************************************
+; Interrupt
+;**************************************************************************
+		org	0
+		jnb	dtmf_det_en,DTMF_DONE
+;**************************************************************************
+; 8 Pulse generators:  These are used by the DTMF detection algorithm.  They
+;	are reference waves, generated at the same frequency to be detected.
+;	the constants are calculated by: TBD
+;	Since these are highly accurate square wave generators, they do not
+;	need to run as often as most interrupt routines (more headroom for
+;	other stuff.)  Each of these timers sets a flag when they overflow.
+;	There is a mainline routine which constantly watches these flags for
+;	overflow, and services each one as it appears.
+; 
+;**************************************************************************
+PULSEGEN	bank	square_wave
+		mov	w,#square_acc_low	; load in the base value of the pulses
+		add	w,pulse_index		; add the index to it
+		mov	fsr,w			; put it in the fsr
+		bank	square_wave		; switch to the pulse wave bank
+		mov	w,pulse_index		; move pulse index into w (index into table)
+		call	DTMF_TABLE		; get the low byte of the constant for the frequency
+		add	indf,w			; add low byte of the frequency generation
+						; constant to the accumulator pointed to by fsr
+		jnc	:no_carry_inc		; if there was no rollover, 
+						;    then don't carry to high byte of accumulator
+		inc	pulse_index		
+		inc	fsr
+		inc	indf			; else carry over to high byte of accumulator
+		jnz	:no_carry		; if high byte rolls over
+		mov	w,pulse_index		;   { move high byte of constant to high byte of accumulator
+		call	DTMF_TABLE		;   get the high byte of the constant for the frequency
+		mov	indf,w			;   move it to high byte of accumulator (which is now zero)
+		jmp	:change_sqr		;   update square wave}
+:no_carry_inc
+		inc	fsr			; update index & pointer to high byte of accumulator 
+		inc	pulse_index		;  (because not done above)
+:no_carry
+		mov	w,pulse_index		; get the high byte of the constant
+		call	DTMF_TABLE
+		add	indf,w			; add it to the high byte of the accumulator
+		jnc	:no_change		; if no carry, jump out
+						;    else
+:change_sqr
+		bank	dtmf_det1		; switch to bank for sin/cos registers
+		xor	sin_cos_mask,dtmf_mask	; xor dtmf_mask (index) into sin_cos_mask to determine
+		mov	w,sin_cos_mask		; if we do sin or cos this time (1 for sin, 0 for cos)
+		and	w,dtmf_mask		; and sin_cos_mask with dtmf_mask to get bit at index (dtmf_mask)
+		jz	:do_cos			; if result is zero, jump to cos code
+:do_sin
+		xor	sin_waves,dtmf_mask	; else toggle the sin wave at index
+		jmp	:do_done		; jump to done
+
+:do_cos		xor	cos_waves,dtmf_mask	; toggle the cos wave at index
+
+:do_done
+
+:no_change	
+		inc	pulse_index		; update the index to point to next constant in table
+		and	pulse_index,#%00001111	; keep the index in range of table
+		bank	dtmf_det1
+		clc				; clear the carry bit
+		snb	dtmf_mask.0		; if mask.0 = 0, don't set carry
+		stc				; else set carry.
+		rr	dtmf_mask		; rotate mask (with carry)
+
+;**************************************************************************
+;:DFT
+; This code takes the input signal, provides feedback, and performs a DFT
+; on the signal using the above frequency references
+;**************************************************************************
+
+		mov	fsr,#sin_cos_bank	; preload fsr with address of first register in storage.
+		add	fsr,dft_index		; add offset to sin/cos register to be serviced
+
+		mov	w,<<rc			; put negative feedback onto
+		not 	w			; input signal
+		mov	rc,w			; and back to RC
+						
+		bank	dtmf_det1
+		mov	dtmf_input,w		; set up dtmf input for xor
+		jb	dft_index.0,:cos	; set up sin or cos reference for xor
+		mov	w,sin_waves		; based on bit zero of dft_index, either load sin_waves or cos_waves
+		jmp	:sin_done
+:cos		mov	w,cos_waves		
+:sin_done
+		and	w,dft_mask		; and out the current value of the sin/cos wave using dft_mask
+		clrb	isr_temp.1		;   make isr_temp.1 = current sin/cos reference
+		sz				;   isr_temp.1 = 0 by default
+		setb	isr_temp.1		;   if result of dft_mask && sin/cos_waves == 1 then setb isr_temp.1
+
+		mov	w,isr_temp
+		xor	w,dtmf_input		; compare input signal to sin/cos reference
+
+						; increment/decrement sin/cos result
+		and	w,#%00000010		; By anding with this value, isolate the result of
+		bank	sin_cos_bank		; the xor.  W will contain either 2 or 0.  Subtract 
+
+		sub	indf,w			; result (2 or 0) from sin/cos_result, then increment.
+		inc	indf			; results in increment or decrement by 1.
+
+		bank	dtmf_det1		; increment the DTMF timers. These timers time how many cycles to 
+		inc	dtmf_count_l		; perform on the input signal.  They time out after about 7 seconds.
+		jnz	:done			; This is to keep the high frequency signals from overflowing their
+		inc	dtmf_count_h		; 8-bit registers.  To detect low frequencies, the detectors need to
+		and	dtmf_count_h,#%00000111	; be run for longer, so keep these running until the timer times out twice.
+		jnz	:no_break		; no_break
+
+		setb	dtmf_det_done		; set flag to indicate DTMF detection is done.
+
+:no_break
+:done
+		clc				; clear the carry bit
+		snb	dft_mask.0		; if mask.0 = 0, don't set carry
+		stc				; else set carry.
+		snb	dft_index.0		; only rotate mask when we've just calculated for cos wave.
+		rr	dft_mask		; rotate mask (with carry)
+		inc	dft_index		; increment dft_index to next location in memory (sin/cos result)
+		and	dft_index,#%00001111	; keep index in range
+		jmp	do_timers		; skip the UARTs.
+DTMF_DONE
+;**************************************************************************
+:transmit
+; This is an asynchronous transmitter
+;**************************************************************************
+		bank	serial
+		clrb    tx_divide.baud_bit      ; clear xmit timing count flag
+		inc     tx_divide               ; only execute the transmit routine
+		STZ                             ; set zero flag for test
+		SNB     tx_divide.baud_bit      ;  every 2^baud_bit interrupt
+		test    tx_count                ; are we sending?
+		JZ      :receive                ; if not, go to :receive
+		clc                             ; yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ; decrement bit counter
+		movb    tx_pin,/tx_low.6        ; output next bit
+
+;**************************************************************************
+:receive
+; This is an asynchronous receiver
+;**************************************************************************
+		movb    c,rx_pin                ; get current rx bit
+		test    rx_count                ; currently receiving byte?
+		jnz     :rxbit                  ; if so, jump ahead
+		mov     w,#9                    ; in case start, ready 9 bits
+		sc                              ; skip ahead if not start bit
+		mov     rx_count,w              ; it is, so renew bit count
+		mov     rx_divide,#start_delay  ; ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ; middle of next bit?
+		setb    rx_divide.baud_bit      ; yes, ready 1 bit period
+		dec     rx_count                ; last bit?
+		sz                              ; if not
+		rr      rx_byte                 ;   then save bit
+		snz                             ; if so
+		setb    rx_flag                 ;   then set flag
+:rxdone
+
+;**************************************************************************
+do_timers	
+; The timer will tick at the interrupt rate (3.26us for 50MHz.)  To set up
+; the timers, move in FFFFh - (value that corresponds to the time.)  Example:
+; for 1ms = 1ms/3.26us = 306 dec = 132 hex so move in $FFFF - $0132 = $FECD
+;**************************************************************************
+
+		bank	timers			; Switch to the timer bank
+		mov	w,#1
+		add	timer_l,w		; add 1 to timer_l
+		jnc	:timer_out		; if it's not zero, then 
+		add	timer_h,w		; don't increment timer_h
+		snc
+		setb	timer_flag		
+		movb	led_pin,timer_h.6	; once timer_h is changed, update the LED
+		bank	dtmf_det1
+		movb	rc.7,sin_waves.7
+:timer_out
+;**************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;**************************************************************************
+DTMF_TABLE
+		jmp	PC+w
+		retw	f697_l
+		retw	f697_h			
+		retw	f770_l
+		retw	f770_h
+		retw	f852_l
+		retw	f852_h	
+		retw	f941_l
+		retw	f941_h
+		retw	f1209_l
+		retw	f1209_h
+		retw	f1336_l
+		retw	f1336_h
+		retw	f1477_l
+		retw	f1477_h
+		retw	f1633_l
+		retw	f1633_h
+;**************************************************************************
+;
+; Main program
+;
+start
+		mov	!option,#%10011111		; enable wreg and rtcc interrupt
+		mov	m,#$F
+		mov	 ra,#%1111			; ra0 = PWM output, ra1 = rx_pin, ra2 = tx_pin, ra3 = in_out
+		mov	!ra,#%0010			; ra0 = PWM output, ra1 = rx_pin, ra2 = tx_pin, ra3 = in_out
+		mov	 rb,#%11101110			; on-hook,led off.
+		mov	!rb,#%00001110			; rb4 = hook, rb0 = led pin
+		mov	 rc,#%00000000			; init rc
+		mov	!rc,#%01111101			; rc2-5 = input, rc1,rc6,rc7 = output
+
+		mov	m,#$D				; make ra0 cmos-level
+		mov	!ra,#%1110
+		mov	m,#$F
+		clr	flags
+							; Send some introduction prompts...
+
+		mov	w,#_hello			; send hello string
+		call	@send_string
+		mov	w,#_instructions		; send instructions
+		call	@send_string
+		mov	w,#_instructions2		; send more instructions
+		call	@send_string
+
+:_cmd_loop	call	@get_byte			; wait until user presses 'D'
+		call	@uppercase
+		cjne	byte,#'D',:_cmd_loop			
+		
+:_dtmf_nothing	bank	dtmf_det1
+		clrb	dtmf_det_flags.same_digit_counter
+:_dtmf_loop
+		call	@DTMF_DETECT				; see if there is a digit...
+		bank	dtmf_det1
+		jnb	dtmf_digit_received,:_dtmf_nothing 	; if not, check again.
+		clrb	dtmf_digit_received			; clear the flag
+
+		mov	this_digit,w				; save the new digit in this_digit
+		cje	this_digit,last_digit,:_equals_last 	; if this digit = last digit, jump
+
+:not_equal	mov	last_digit,this_digit			; if this digit does not = last...
+		clr	dtmf_det_flags
+		jmp	:_dtmf_loop
+
+:_equals_last
+		mov	last_digit,this_digit
+		jb	dtmf_det_flags.same_digit_counter,:three_times 
+		setb	dtmf_det_flags.same_digit_counter; If we haven't received 3 digits yet, next time will be the third.
+		jmp	:_dtmf_loop
+
+:three_times
+		call	NUM_TABLE
+		call	@send_byte
+:wait        	test    tx_count                ; wait for not busy
+		jnz     :wait                   ;
+
+		jmp	:_dtmf_loop
+;**************************************************************************
+NUM_TABLE
+; This routine returns with an ascii value equivalent to the digit pressed 
+; to cause the detected tone.
+;**************************************************************************
+		add	pc,w
+		retw	'1'
+		retw	'2'
+		retw	'3'
+		retw	'A'
+		retw	'4'
+		retw	'5'
+		retw	'6'
+		retw	'B'
+		retw	'7'
+		retw	'8'
+		retw	'9'
+		retw	'C'
+		retw	'*'
+		retw	'0'
+		retw	'#'
+		retw	'D'
+;**************************************************************************
+org	$200
+;**************************************************************************
+;	Miscellaneous subroutines
+;**************************************************************************
+
+;**************************************************************************
+; Subroutine - Get byte via serial port
+;**************************************************************************
+get_byte     	jnb     rx_flag,$		; wait till byte is received
+		clrb    rx_flag			; reset the receive flag
+		bank	serial
+		mov     byte,rx_byte		; store byte (copy using W)
+						; & fall through to echo char back
+;**************************************************************************
+; Subroutine - Send byte via serial port
+;**************************************************************************
+send_byte    	bank    serial
+
+:wait        	test    tx_count                ; wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ; ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ; 1 start + 8 data + 1 stop bit
+		RETP                            ; leave and fix page bits
+
+;**************************************************************************
+; Subroutine - Send string pointed to by address in W register
+;**************************************************************************
+send_string	bank	serial
+ 		mov     string,w                ; store string address
+:loop        	mov     w,string                ; read next string character
+		mov     m,#4                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ; reset the mode register
+		test    w                       ; are we at the last char?
+		snz                             ; if not=0, skip ahead
+		RETP                            ; yes, leave & fix page bits
+		call    send_byte               ; not 0, so send character
+		inc     string                  ; point to next character
+		jmp     :loop                   ; loop until done
+
+;**************************************************************************
+; Subroutine - Make byte uppercase
+;**************************************************************************
+uppercase    	bank	serial
+		csae	byte,#'a'            	; if byte is lowercase, then skip ahead
+		RETP
+
+		sub     byte,#'a'-'A'           ; change byte to uppercase
+		RETP                            ; leave and fix page bits
+
+;**************************************************************************
+org	$400
+;**************************************************************************
+; String data (for RS-232 output) and tables
+;**************************************************************************
+_hello          dw      13,10,13,10,'DTMF Detection Ver. 2.0',13,10,0
+_instructions	dw	'-Press D to enable DTMF detection',13,10,0
+_instructions2	dw	'>',0
+;**************************************************************************
+org	$600
+;**************************************************************************
+; DTMF Detection subroutines
+;**************************************************************************
+;**************************************************************************
+clear_sin_cos_bank
+; This subroutine clears the contents of sin_cos_bank, to reload for a new
+; DTMF detection.  
+; INPUTS:
+; bank_index:  This routine will start clearing from the offset specified in
+;		bank_index.
+;**************************************************************************
+:clr_loop	mov	fsr,#sin_cos_bank	; load the fsr with sin_cos_bank
+		bank	dtmf_det1		
+		add	fsr,bank_index		; add index to fsr to clear next location
+		bank	sin_cos_bank		; in memory.
+		clr	indf			; clear the location
+		bank	dtmf_det1		
+		inc	bank_index		; increment the index
+		and	bank_index,#%00001111	; keep it under 16
+		jnz	:clr_loop		; continue until whole bank is clear.
+		retp
+;**************************************************************************
+get_winner
+; This subroutine checks to see if one of 4 DTMF frequencies are present,
+; and it also checks to see if one is greater than the others.  To set it
+; up, initialize these registers:
+; winner = 4
+; high score = lower threshold.  This must be defeated to indicate a frequency
+;				 is present.
+; fsr = location of first frequency to compare in memory.  (eg. sin_result_5)
+; example:  To check if there is a high frequency present:
+;		mov	winner,#4
+;		mov	high_score,#50
+;		clr	bank_index		; start at 0
+;		mov	fsr,#sin_result_5	; Make fsr point to sin_result_4
+;		call	@get_winner		; long call to get winner
+;
+; To see if a frequency is found, simply check for a 4 in the winner register.
+; if there is still a 4 in winner, then nothing defeated the lower threshold.
+;**************************************************************************
+:compare_loop	bank	sin_cos_bank
+		jnb	indf.7,:sinpos		; if result is negative, invert it and add 1
+		not	indf
+		inc	indf		
+:sinpos
+		inc	fsr			; Make fsr point to cos
+		jnb	indf.7,:cospos		; if result is negative, invert it and add 1
+		not	indf
+		inc	indf			
+:cospos
+		mov	w,indf			; move cos result into w
+		dec	fsr			; make fsr point to sin
+		add	w,indf			; add sin result to cos result
+		inc	fsr
+		inc	fsr			; point to next sin value
+		
+		bank	dtmf_det1
+		mov	contender,w		; move this value into contender, to compete against winner.
+		cjb	contender,high_score,:not_winner ; if this result is higher than the previous result, make this the winner.
+:winner
+		mov	high_score,contender
+		mov	winner,bank_index
+:not_winner	inc	bank_index
+		and	bank_index,#%00000011
+		jnz	:compare_loop
+		retp
+;**************************************************************************
+INITIALIZE_DTMF
+;**************************************************************************
+
+		bank	dtmf_det1
+		
+		mov	dtmf_mask,#%10000000		; initialize dtmf mask
+		mov	dft_mask,#%10000000		; initialize dft mask
+		clr	dft_index
+
+		clr	pulse_index			; clear DTMF detection registers
+		clr	sin_cos_mask			
+		clr	sin_waves
+		clr	cos_waves
+		call	@clear_sin_cos_bank
+		ret
+;**************************************************************************
+DTMF_DETECT
+; This subroutine enables the DTMF detectors and returns with the digit
+; received in w.  If no digit is received, this routine returns with 
+; dtmf_digit_received = 0 cleared.
+; INPUTS:  NONE
+; OUTPUTS: dtmf_digit_received:  This bit will be set if a valid digit was
+;			received, otherwise it will be cleared.
+; 	   w:		If a valid digit was received, this routine returns
+;			with a table index (0-15) which indicates which digit
+;			was received. 
+;**************************************************************************
+		call	INITIALIZE_DTMF	; initialize DTMF registers.
+		setb	hook
+		setb	dtmf_det_en		; enable the DTMF detectors
+		jnb	dtmf_det_done,$		; wait until they have run long enough
+		clrb	dtmf_det_done		; for a high frequency.
+						; Now check to see if we have a good high frequency result.  (Over 60)
+
+		bank	dtmf_det1		; Set up to check for high frequency
+		mov	winner,#4		; 
+		mov	high_score,#45
+		clr	bank_index		; Start at zero
+		mov	fsr,#sin_result_5	; Make fsr point to sin_result_4
+
+		call	get_winner		; Put the high frequencies to the test.
+		jb	winner.2,:no_winner	; if winner.2 is a 1, then 4 is still present
+						; in winner and nothing defeated the lower
+						; threshold.
+
+:was_winner	bank	dtmf_det1
+		mov	last_high,winner	; store the last high frequency to win, for comparison if it wins again.
+		mov	bank_index,#8		; High frequency stuff starts at an index of 8.
+		call	@clear_sin_cos_bank
+		jnb	dtmf_det_done,$		; wait until they have run long enough
+		clrb	dtmf_det_done		; for a high frequency.
+						; Now check to see if we have a good high frequency result.  (Over 60)
+		bank	dtmf_det1		; Set up to check for high frequency
+		mov	winner,#4		; 
+		mov	high_score,#50
+		clr	bank_index		; Start at zero
+		mov	fsr,#sin_result_1	; Make fsr point to sin_result_1 (low frequencies)
+		call	get_winner		; does anything exceed this threshold?
+		jb	winner.2,:no_winner	; if winner.2 is a 1, then 4 is still present
+						; in winner and nothing defeated the lower
+						; threshold.
+		mov	last_low,winner	; save the value of the winner
+		clrb	dtmf_det_en
+
+		mov	winner,#4		; Now check to see if there was a high winner again.
+		mov	high_score,#45
+		clr	bank_index		; Start at zero
+		mov	fsr,#sin_result_5	; Make fsr point to sin_result_1 (low frequencies)
+		call	get_winner		; does anything exceed this threshold?
+
+		cjne	winner,last_high,:no_winner	; If the winner this time does not = the last winner,
+						; Then it was probably noise that caused the DTMF reception.
+		setb	dtmf_digit_received
+		clrb	dtmf_det_en
+		clr	bank_index		; clear bank_index to clear the whole bank.
+		call	@clear_sin_cos_bank	; and clear the bank
+
+		clc
+		rl	last_low
+		mov	w,<<last_low
+		add	w,last_high		; put index to character received in w
+		retp				; return
+
+:no_winner	clrb	dtmf_digit_received
+		clrb	dtmf_det_en
+		clr	bank_index		; clear bank_index to clear the whole bank.
+		call	@clear_sin_cos_bank	; and clear the bank
+		retp				; return

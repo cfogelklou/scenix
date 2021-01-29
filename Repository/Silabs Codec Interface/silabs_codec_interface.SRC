@@ -1,0 +1,1469 @@
+; Modified on 8/23/99 for Chris to do Dial tone detection
+
+; DTMF detection with the SX, using Silicon Labs DAA 
+; revision 3.291
+; the following code is working code only, it is not optimized, nor is it the best embodiment. Caveat Emptor!
+
+parallax	=	1
+sx_28l		=	1
+selftest	=	0				; test by reading registers with distinctive value
+							; like chip revisions
+if sx_28l and parallax
+		device	SX28L,OSCXT5
+		device	turbo,STACKX_OPTIONX
+else
+		device	pins28,pages4,banks8,oschs
+		device	turbo,stackx,optionx
+endif
+		id	'Codectst'
+		reset	reset_entry
+if parallax
+		freq	50_000_000
+endif
+
+;
+;
+; Equates
+;
+sdo		=	rb.7
+sclk		=	rb.5
+fsync		=	rb.6
+sdi		=	rb.4
+
+;
+;
+; Variables
+;
+	
+;*********************************************************
+; Global Registers:  7 used
+;*********************************************************
+	org	$8
+	sample_lows_bit	equ	2	; this bit of the flags register determines whether or not to sample the high or low frequencies
+
+	flags		ds	1
+		rx_flag		equ	flags.0			; Indicates when a byte has been received by the UART
+		irq_flag	equ	flags.1			; Indicates when an interrupt has occurred
+		sample_lows	equ	flags.sample_lows_bit	; See above
+		ref_sign	equ	flags.3			; The sign bit for the sine/cosine reference
+		input_sign	equ	flags.4			; The sign for the input data
+		new_data_flag	equ	flags.5			; A flag indicating when new data has arrived
+		serial_in_sign	equ	flags.6
+	temp1		ds	1	; temp1 is used to store the pointer to the bank of data to operate on.
+	temp2		ds	1	; temp2 is a temporary operations register
+	temp3		ds	1	; temp3 is a temporary register
+	temp4		ds	1
+	temp5		ds	1
+	ulawbyte	ds	1	; re-use temp1 to store the ulawbyte
+	in_byte		equ	ulawbyte
+flag		ds	1
+	; definition of the bits in the flag		
+	busy		equ	7			; bit 7=busy
+
+	wait_rtcc	equ	5			; wait for rtcc
+
+	fast_sclk	equ	4			; after programming N1,M1, sclk will become 2.88 MHz(vs. 200K) from reset
+	fast_sclk2	equ	3			; after programming N2,M2, sclk will become 2.048 MHz (t=488 ns) 
+
+	fast_data	equ	2			; data manipulation 
+	toggle		equ	1			; ignore the next FSYNC if =1
+	data_ready	equ	0			; bit 0=data ready to send
+
+;*********************************************************
+	org	$10
+;*********************************************************
+serial		=       $		;UART bank
+
+tx_high		ds      1		;hi byte to transmit
+tx_low		ds      1		;low byte to transmit
+tx_count	ds      1		;number of bits sent
+tx_divide	ds      1		;xmit timing (/16) counter
+rx_count	ds      1		;number of bits received
+rx_divide	ds      1		;receive timing counter
+rx_byte		ds      1		;buffer for incoming byte
+string		ds	1
+byte		ds	1
+hex		ds	1
+
+math_bank	=	$		; use this bank for the multiplications
+loop_count	equ	rx_divide	
+input		equ	rx_byte
+answer_l	equ	string
+answer_h	equ	byte
+
+u_law_bank	=	$		; re-use the math_bank for the u_law conversion
+
+exponent	equ	tx_high		; re-use registers to perform a u-law conversion
+mantissa_l	equ	tx_low
+mantissa_h	equ	tx_count
+sample_l	equ	tx_divide
+sample_h	equ	rx_count	
+
+
+
+;*********************************************************
+	org	$30
+;*********************************************************
+
+	ref_bank	= 	$	; Accumulator/counters used to run the references.
+	ref_acc1_l	ds	1	; the low byte of the phase accumulator for the lowest frequency being generated
+	ref_acc1_h	ds	1	
+	ref_acc2_l	ds	1
+	ref_acc2_h	ds	1
+	ref_acc3_l	ds	1
+	ref_acc3_h	ds	1
+	ref_acc4_l	ds	1
+	ref_acc4_h	ds	1	; the high byte of the phase accumulator for the highest frequency being generated
+	sample_counter	ds	1
+	bit_count	ds	1
+	process_bank	=	$
+	low_present_flags	ds	1	; These flags are set when a low frequency is detected as being present and valid.
+	low_present_1	equ	low_present_flags.0
+	low_present_2	equ	low_present_flags.1
+	low_present_3	equ	low_present_flags.2
+	low_present_4	equ	low_present_flags.3
+	low_present_5	equ	low_present_flags.4
+	low_present_6	equ	low_present_flags.5
+	high_present_flags	ds	1	; These flags are set when a high frequency is detected as being present and valid
+	high_present_1	equ	high_present_flags.0
+	high_present_2	equ	high_present_flags.1
+	high_present_3	equ	high_present_flags.2
+	high_present_4	equ	high_present_flags.3
+	high_present_5	equ	high_present_flags.4
+	high_present_6	equ	high_present_flags.5
+	digit_detected_1	ds	1	; Variables for storing the digits that are detected.  With two in each,
+	digit_detected_2	ds	1	; can store a total of 6 digits.
+	digit_detected_3	ds	1
+	valid_digit_flags	ds	1	; These flags indicate the presence of a fully validated digit in one of the registers.
+	
+	
+;*********************************************************
+	org	$50
+;*********************************************************
+	DTMF_CH_1	=	$
+
+	sin_acc1_l	ds	1		; Sine and cosine accumulators for accumulating the results of the DFT
+	sin_acc1_h	ds	1
+	cos_acc1_l	ds	1
+	cos_acc1_h	ds	1
+	sin_acc2_l	ds	1
+	sin_acc2_h	ds	1
+	cos_acc2_l	ds	1
+	cos_acc2_h	ds	1
+	sin_acc3_l	ds	1
+	sin_acc3_h	ds	1
+	cos_acc3_l	ds	1
+	cos_acc3_h	ds	1
+	sin_acc4_l	ds	1
+	sin_acc4_h	ds	1
+	cos_acc4_l	ds	1
+	cos_acc4_h	ds	1
+
+	high_score_l	equ	sin_acc1_l
+	high_score_h	equ	sin_acc1_h
+	winner		equ	sin_acc2_l	; re-use the empty registers for the get_winner routine
+	bank_index	equ	sin_acc2_h
+	runner_up_score_l equ	sin_acc3_l
+	runner_up_score_h equ	sin_acc3_h
+	channel_mask	equ	sin_acc4_l
+	
+	
+
+	
+	org	$70
+codec	=	$
+count		ds	1
+
+data_in_low	ds	1
+data_in_high	ds	1
+
+data_out_low	ds	1
+data_out_high	ds	1
+
+
+
+
+reg_data_low	ds	1
+
+
+reg_data_high	ds	1
+key		ds	1
+	
+;**************************************************************************
+; Equates for DTMF rates when called at a frequency of 8.192kHz
+; The constant = 0x10000 / (8000 / FREQ), where the resultant upper byte =
+; an index into a sine table.
+; Therefore, constant = 8.192 * FREQ
+;**************************************************************************
+
+	f697_h		equ	$16	; DTMF Frequency
+	f697_l		equ	$4d
+
+	f770_h		equ	$18	; DTMF Frequency
+	f770_l		equ	$a3
+
+
+	f852_h		equ	$1b	; DTMF Frequency
+	f852_l		equ	$43
+
+	f941_h		equ	$1e	; DTMF Frequency
+	f941_l		equ	$1c
+
+	f1209_h		equ	$26	; DTMF Frequency
+	f1209_l		equ	$b0
+
+	f1336_h		equ	$2a	; DTMF Frequency
+	f1336_l		equ	$c0
+
+	f1477_h		equ	$2f	; DTMF Frequency
+	f1477_l		equ	$43
+
+	f1633_h		equ	$34	; DTMF Frequency
+	f1633_l		equ	$41
+
+;**************************************************************************
+;**************************************************************************
+	low_th_h	equ	$07	; The threshold a low frequency needs
+	low_th_l	equ	$00	; to surpass to be considered valid
+	high_th_h	equ	$07	; The threshold a high frequency needs
+	high_th_l	equ	$00	; to surpass to be considered valid
+	low_samples	equ	105	; The number of samples to take to detect a low frequency
+	high_samples	equ	105	; The number of samples to take to detect a high frequency
+;**************************************************************************
+watch	winner,8,udec
+watch	high_score_l,8,uhex
+watch	high_score_h,8,uhex
+watch	high_score_l,16,udec
+watch	bank_index,8,udec
+watch	runner_up_score_l,16,udec
+watch	wreg,8,udec
+watch	in_byte,8,udec
+watch	sample_lows,1,ubin
+watch	ref_sign,1,ubin
+watch	input_sign,1,ubin
+watch	bit_count,8,ubin
+watch	temp1,8,udec
+watch	temp2,8,udec
+watch	temp3,8,udec
+watch	temp2,16,sdec
+watch	indf,8,udec
+watch	sin_acc1_l,16,sdec
+watch	cos_acc1_l,16,sdec
+watch	sin_acc2_l,16,sdec
+watch	cos_acc2_l,16,sdec
+watch	sin_acc3_l,16,sdec
+watch	cos_acc3_l,16,sdec
+watch	sin_acc4_l,16,sdec
+watch	cos_acc4_l,16,sdec
+watch	low_present_flags,8,ubin
+watch	high_present_flags,8,ubin
+watch	digit_detected_1,8,ubin
+watch	digit_detected_2,8,ubin
+watch	digit_detected_3,8,ubin
+watch	valid_digit_flags,8,ubin
+watch	channel_mask,8,ubin
+
+		org	0
+;
+;
+; Interrupt routine - virtual peripherals
+;
+;algorithm:
+; 1. enable FSYNC interrupt on falling edge
+; 2. when FSYNC falling edge arrives, enable RTCC interrupt of 2.5 us (32 times to capture and output 16 bits)
+; 3. when RTCC interrupt arrives, check if SCLK=1, output SDI if yes,
+;					else	   input SDO if SCLK=0
+; 4. after 32 times of RTCC interrupt, disable it 
+
+interrupt	
+						; clk cycle	accum.
+		; ext interrupt latency	+detect	; 5		5 +10ns
+		snb	flag.fast_sclk2		; 2.048MHz?
+		jmp	fast_sclk2_isr
+		snb	flag.fast_sclk		; 1 (no skip)	6
+		jmp	fast_sclk_isr		; 3		9
+		snb	flag.fast_data
+		jmp	fast_data_isr
+		snb	flag.wait_rtcc
+		jmp	rtcc_isr
+; check interrupt source
+check_int_src	mov	m,#$09			; 1	 read interrupt pending
+		clr	w			; 1
+		mov	!rb,w			; 1	read WKPND_B register into w
+		mov	m,#$0f			; 1	restore
+
+		and	w,#%01000000		; Has FSYNC arrived?
+		jnz	fsync_isr		; yes
+		reti
+
+
+		; since last FSYNC, rtcc has been disabled, so this interrupt must be caused by a new FSYNC
+		; remember that Fsclk=2.88 MHz, Tsclk=347 ns~= 17 clk cycles 
+		; half cycle = 173.5 ns ~= 8 clk cycles
+		; 100 ns already spent as interrupt latency at 50MHz (ext. int. vs. 60ns for RTCC int)
+		; ~6 clk cycles passed at this point, including 10 ns for detecting rising edge of FSYNC
+						; clk cycle	total
+fast_sclk_isr					
+		mov	m,#$09			; 1	 	10 read interrupt pending
+		clr	w			; 1		11 clear interrupt pending
+		mov	!rb,w			; 1		12 read WKPND_B register into w
+		mov	count,#16
+		
+		; since we have passed the half cycle time of 8 clk cycles, sclk must be low now
+		; wait for rising edge to sent sdi
+		; read sdo on falling edge since the 3032 sent it on rising edge, it must be valid by the falling edge
+
+		; rising edge of sclk arrived
+		; sclk=1, output sdi
+			    
+		clr 	data_in_high
+		clr	data_in_low		; clear data_in register
+
+		clc				; first clear of carry outside the loop
+						; next carry cleared by rotating data_in_high left (which is initially zero)
+		; the following loop has 17 cycles=340 ns
+out_sdi						; 1 		16
+		rl	data_out_low		; 1		17
+		rl	data_out_high		; 1		18	
+		sc				; 1		19
+		clrb	sdi			; 1		20=410 ns if clear
+		snc				; 1		21
+		setb	sdi			; 1		22=450 ns
+	
+		nop
+		nop
+
+		clc				; 1
+		snb	sdo			; 1 skip if sdo=0.
+		stc				; 1 no skip, then sdo=1
+		rl	data_in_low		; 1
+		rl	data_in_high		; 1
+	
+	
+	
+		djnz	count,out_sdi
+		; end of count
+	
+fast_sclk_isr_done
+		clr	flag
+		;trigger 3
+		reti	
+	
+fast_data_isr	; here for getting line data with SCLK=2.048 MHz				
+		mov	m,#$09			;  read interrupt pending
+		clr	w			;  clear interrupt pending
+		mov	!rb,w			;  read WKPND_B register into w
+	
+		sb	flag.toggle
+		jmp	fast_data_isr_done
+		mov	fsr,#count
+		mov	count,#16
+		
+		; rising edge of sclk arrived
+		; sclk=1, no need output sdi here, just grap the input 
+
+		clr 	data_in_high
+		clr	data_in_low
+
+		;nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		clc				; first clear of carry outside the loop
+						; next carry cleared by rotating data_in_high left (which is initially zero)
+		; the following loop should have 488 ns~=24 cycles	
+fast_data_loop					 		
+		;rl	data_out_low		; 1		
+		;rl	data_out_high		; 1			
+		;sc				; 1		
+		;clrb	sdi			; 1		
+		;snc				; 1		
+		;setb	sdi			; 1		
+	
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		
+		nop
+		nop
+		nop
+		nop
+		
+		clc				; 1
+		snb	sdo			; 1 skip if sdo=0.
+		stc				; 1 no skip, then sdo=1
+		rl	data_in_low		; 1
+		rl	data_in_high		; 1
+		nop
+		nop
+
+
+
+
+		djnz	count,fast_data_loop	; 4
+
+	mov	temp4,data_in_low
+	mov	temp5,data_in_high
+	setb	new_data_flag
+fast_data_isr_done	
+		xor	flag,#%00000010		; toggle the toggle bit
+
+		; show period of sample_lows flag
+;		sb	flag.sample_lows
+;		clrb	rb.2
+;		snb	flag.sample_lows
+;		setb	rb.2		
+		reti		
+
+
+
+fast_sclk2_isr	; here for SCLK=2.048 MHz				
+		mov	m,#$09			; 1	 	10 read interrupt pending
+		clr	w			; 1		11 clear interrupt pending
+		mov	!rb,w			; 1		12 read WKPND_B register into w
+		mov	count,#16
+		
+		; since we have passed the half cycle time of 8 clk cycles, sclk must be low now
+		; wait for rising edge to sent sdi
+		; read sdo on falling edge since the 3032 sent it on rising edge, it must be valid by the falling edge
+
+		; rising edge of sclk arrived
+		; sclk=1, output sdi
+
+		clr 	data_in_high
+		clr	data_in_low
+
+
+		
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		clc				; first clear of carry outside the loop
+						; next carry cleared by rotating data_in_high left (which is initially zero)
+		; the following loop should have 488 ns~=24 cycles	
+out_sdi2					 		
+		rl	data_out_low		; 1		
+		rl	data_out_high		; 1			
+		sc				; 1		
+		clrb	sdi			; 1		
+		snc				; 1		
+		setb	sdi			; 1		
+	
+		;trigger 3
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
+		
+
+		
+		clc				; 1
+		snb	sdo			; 1 skip if sdo=0.
+		stc				; 1 no skip, then sdo=1
+		rl	data_in_low		; 1
+		rl	data_in_high		; 1
+	
+		djnz	count,out_sdi2		; 4
+		; end of count
+	
+		clr	flag
+		;trigger 3		
+		reti		
+
+
+
+; FSYNC frame =mode 0 of silicon DAA
+fsync_isr	
+		
+		; enable RTCC interrupt of 2.5 us, 32 times
+		mov	count,#32		;2
+		setb	flag.busy		;1 processing input
+		setb	flag.wait_rtcc
+		mov	!option,#%10011111	;2 enable rtcc interrupt
+		mov	data_in_low,#0
+		mov	data_in_high,#0
+		clr	rtcc
+		;trigger 3
+		reti	
+
+	
+end_rtcc_isr	mov	w,#-125			; 1
+		;trigger 3
+		retiw				; 1
+rtcc_isr	sb	sclk			; skip if sclk=1
+		jmp	read_sdo
+		; sclk=1, output sdi
+		snb	flag.data_ready
+		jmp	output_sdi
+next		djnz	count,end_rtcc_isr
+		; end of count
+		; disable RTCC interrupt
+		clr	flag
+	
+		mov	!option,#%11011111	;disable rtcc interrupt
+		;trigger 3
+		reti
+
+read_sdo	clc
+		rl	data_in_low
+		rl	data_in_high
+		sb	sdo
+		clrb	data_in_low.0
+		snb	sdo	
+		setb	data_in_low.0
+		
+		
+		jmp     next
+
+output_sdi	clc
+		rl	data_out_low
+		rl	data_out_high
+		sc
+		clrb	sdi
+		snc
+		setb	sdi
+		jmp	next
+
+
+		; subroutine to write data to DAA at initial clk speed
+		; entry:
+		;	data	= reg_data_high
+		;	reg. no.= w
+		; exit: data written into register
+write_reg	mov	reg_data_low,w				; register number
+:loop		snb	flag.busy				; no need to set R/W bit
+		jmp	:loop					; wait for last transaction done
+;
+; request secondary frame update
+		mov	data_out_low,#$01
+		mov	data_out_high,#$00
+		setb	flag.data_ready
+:wrloop		snb	flag.data_ready
+		jmp	:wrloop
+
+		mov	data_out_low, reg_data_high		; register data
+		mov	data_out_high,reg_data_low		; register number
+		setb	flag.data_ready
+:wrloop2	snb	flag.data_ready				; loop until done
+		jmp	:wrloop2
+		ret
+
+		; subroutine to write data to DAA at 2.88 MHz
+		; entry:
+		;	data	= reg_data_high
+		;	reg. no.= w
+		; exit: data written into register
+write_reg2	mov	reg_data_low,w				; register number
+:loop		snb	flag.busy				; no need to set R/W bit
+		jmp	:loop					; wait for last transaction done
+
+:loop2		snb	flag.fast_sclk				; 
+		jmp	:loop2					; wait for last transaction done
+
+	
+		
+		; request secondary frame update
+		mov	data_out_low,#$01
+		mov	data_out_high,#$00
+
+		setb	flag.fast_sclk				; use as data ready
+:wrloop		snb	flag.fast_sclk
+		jmp	:wrloop
+
+		mov	data_out_low, reg_data_high		; register data
+		mov	data_out_high,reg_data_low		; register number
+
+		setb	flag.fast_sclk
+:wrloop2	snb	flag.fast_sclk				; loop until done
+		jmp	:wrloop2
+		ret
+	
+		; subroutine to write data to DAA at 2.048 MHz
+		; entry:
+		;	data	= reg_data_high
+		;	reg. no.= w
+		; exit: data written into register
+write_reg3	mov	reg_data_low,w				; register number
+		; wait for last transaction done
+
+:loop		snb	flag.fast_sclk2				; 
+		jmp	:loop					; wait for last transaction done
+
+	
+		; request secondary frame update
+		mov	data_out_low,#$01
+		mov	data_out_high,#$00
+
+		setb	flag.fast_sclk2			; use as data ready
+:wrloop		snb	flag.fast_sclk2
+		jmp	:wrloop
+
+		mov	data_out_low, reg_data_high		; register data
+		mov	data_out_high,reg_data_low		; register number
+
+		setb	flag.fast_sclk2
+:wrloop2	snb	flag.fast_sclk2			; loop until done
+		jmp	:wrloop2
+		ret	
+
+		;enter: w	= register to read
+		; exit: data_in  = returned value
+
+read_reg	mov	reg_data_low,w
+		or	reg_data_low,#%00100000
+:loop		snb	flag.busy
+		jmp	:loop
+		; request secondary frame update
+		mov	data_out_low,#$01
+		mov	data_out_high,#$00
+		setb	flag.data_ready
+:rdloop		snb	flag.data_ready
+		jmp	:rdloop
+		clr	data_out_low
+		mov	data_out_high,reg_data_low
+		setb	flag.data_ready
+:rdloop2	snb	flag.data_ready
+		jmp	:rdloop2
+
+		mov	reg_data_low,data_in_low
+		mov	reg_data_high,data_in_high
+		
+		ret
+		; enter: w	= register to read
+		; exit: data_in  = returned value
+		; read register at 2.048 MHz
+
+read_reg3	mov	reg_data_low,w
+		or	reg_data_low,#%00100000
+
+		; finish last transaction first
+
+:loop		snb	flag.fast_sclk
+		jmp	:loop
+
+		; request secondary frame update
+		mov	data_out_low,#$01
+		mov	data_out_high,#$00
+		setb	flag.fast_sclk2
+:rdloop		snb	flag.fast_sclk2
+		jmp	:rdloop
+		clr	data_out_low
+		mov	data_out_high,reg_data_low
+		setb	flag.fast_sclk2
+:rdloop2	snb	flag.fast_sclk2
+		jmp	:rdloop2
+
+		mov	reg_data_low,data_in_low
+		mov	reg_data_high,data_in_high
+		
+		ret
+;
+;
+;********
+;* Main *
+;********
+;
+;
+; Reset entry
+;
+;	RB4	=	SDI		output
+;	  6	=	FSYNC		input
+;	  5	=	SCLK		input
+;	  7	=	SDO		input
+;	  3	=	logic analyzer  trigger output
+;	  2,1,0 =	LED indicators
+reset_entry	
+		clr	fsr			;reset all ram banks
+:loop		setb	fsr.4
+		clr	ind
+		ijnz	fsr,:loop
+
+
+		bank	codec
+		mov	m,#$0f			; setup data direction
+		mov	 rb,#%11101111		;init rb
+		mov	!rb,#%11100000		; only SDI is output on RB7
+		mov	m,#$0a			; WKED_B
+		mov	!rb,#%10111111		; interrupt on rising edge of FSYNC
+		mov	m,#$09
+		clr	w
+		mov	!rb,w			; clear the random value in WKPND_B reg.
+		mov	m,#$0b			; WKEN_B
+		mov 	!rb, #%10111111		; enable interrupt on FSYNC
+		mov	m,#$0f			; point back to ports
+		
+		mov	!option,#%11011111	;disable rtcc interrupt
+		clr	flag
+	
+IF selftest	
+		mov	w,#2			; read register 2
+		call	read_reg
+		
+		mov     w,#6                    ; read register DAA control 2
+	        call    read_reg                ; result should be 70 hex
+
+	
+	        mov     w,#11                   ; read chip revision
+	        call    read_reg                ; result dependent on version
+ENDIF
+		; 
+
+		; MCLK= 4.000MHz
+	
+		; Fbase= Fmclk*M1*16/(N1* 25)= 4 MHz*72*16/(5*25)=36.864 MHz, CGM=1
+		; N1=5, M1=72, CGM=1
+		; N2=9, M2=10	->  Fs=8KHz
+
+		; values to be written should be 1 less than value listed
+		; in the exact sequence shown below
+		; reg. 7=N1=4
+		; reg. 8=M1=71
+		; reg. 10=cgm=1
+		; reg. 9= N2|M2=8|9= 1000 1001
+
+		mov	reg_data_high,#4	;N1
+		mov	w,#7
+		call	write_reg
+		
+		mov	reg_data_high,#71	;M1
+		mov	w,#8
+		call	write_reg
+		
+	
+				
+		mov	reg_data_high,#1	; cgm
+		mov	w,#10
+		call	write_reg2
+
+		mov	reg_data_high,#$89	; N2, M2
+		mov	w,#9
+		call	write_reg2
+	
+	    
+		; switch to normal operation
+		; reg. 6= DAA control 2= 0110 0000
+		mov	reg_data_high,#$60
+		mov	w,#6
+		call	write_reg3
+	
+isolink_loop					; wait for ISOlink to be established
+		mov	w,#12
+		call	read_reg3
+
+		sb	reg_data_low.6		; ISOlink frame detected?
+		jmp	isolink_loop
+		
+		
+		; finish initialization now
+		; detect ring and go off hook
+		; read ring detect bit from register 5, bit 2
+ring_loop	mov	w,#5
+		call	read_reg3
+		sb   	reg_data_low.2		; loop until ring detected
+		jmp	ring_loop
+	
+			
+		; ringing signal detected
+		; now go off hook
+		
+		or	reg_data_low,#%00000001
+		mov	reg_data_high,reg_data_low
+		mov	w,#5
+		call	write_reg3	
+
+dtmf_loop	
+		mov	!option,#%01011111			; wreg to be addressed	
+		; FSYNC comes now at every 62.5 us, but data is at every 125 us
+		setb	flag.fast_data
+		setb	flag.toggle
+	
+
+start						; beginning of main program
+	clrb	sample_lows
+	
+:loopstart
+	
+	setb	wreg.sample_lows_bit		; toggle the sample_lows bit high-->low or low--> high to sample high or low 
+	xor	flags,w				; frequencies.	
+	mov	fsr,#DTMF_CH_1			; clear all of the accumulators
+	call	@clear_bank
+;break
+	bank	sample_counter
+	mov	w,#low_samples			; take (low_samples) samples for a low frequency
+	sb	sample_lows			; and (high_samples) samples for a high frequency
+	mov	w,#high_samples			
+	mov	sample_counter,w		; load sample_counter with this value
+	
+
+
+;:sync						; synchronize to the incoming data (sres stays high until the 
+;	jb	sres,$				; sres pin goes low and high again.  The sres pin going low indicates
+;	jnb	sres,$				; the beginning of new data.)
+;	bank	bit_count
+;	mov	bit_count,#16			; and reload the bit_count register and clear the new_data_flag
+	clrb	new_data_flag
+	
+:loop
+	call	@get_next_byte			; get a byte of data
+	;break
+	test	in_byte				;1 
+	sz					;1; don't do the calculation if the input data == 0	
+	call	@DTMF_DETECT_CH_1		;489,564
+
+:end_loop
+	page	update_refs			;1
+	call	update_refs			;36,71
+	bank	sample_counter			;1
+	decsz	sample_counter			;1
+	jmp	:loop				;3,569 cycles worst case
+
+
+
+:CALC_CHANNEL_1
+	break
+	mov	temp1,#DTMF_CH_1		; Load the temp1 register with a pointer to the bank to process
+	call	@square_and_add_bank		; Square the sine and cosine accumulator values and add the results
+	call	@get_winner			; Get the highest and second-highest results
+	bank	DTMF_CH_1
+;	mov	channel_mask,#%00000001		; Load the appropriate channel_mask with the bit_mask for this channel
+;	snb	sample_lows
+;	call	@is_low_valid			; Check for a valid low frequency
+;	sb	sample_lows
+;	call	@is_high_valid			; Check for a valid high frequency and a valid digit.
+
+;	bank	ref_bank
+;	mov	w,digit_detected_1
+;	snb	valid_digit_flags.0		; If channel 1 is indicating a valid digit, display the valid digit
+
+	mov	w,winner
+	bank	codec
+
+	jb	sample_lows,:low_f
+	;show high freq
+	mov	reg_data_high,w
+	
+	mov	w,reg_data_low
+	clc
+	rl	wreg
+	add	w,reg_data_low
+	add	w,reg_data_high
+	inc	wreg
+	
+	mov	key,w
+	cjne	key,#11,:not_zero
+	mov	key,#0
+:not_zero
+	not 	key
+	mov	w,rb
+	and	w,#%11110000
+	or	w,key
+	mov	rb,w				; on the lower nybble of port rb
+	jmp	:loopstart			; and return to the top of the loop
+:low_f
+	mov	reg_data_low,w
+	jmp	:loopstart
+
+
+
+;**************************************************************************
+org	$400
+; Digital DTMF detection routines
+;**************************************************************************
+Multiply		jmp	_Multiply
+get_winner		jmp	_get_winner
+square_and_add_bank	jmp	_square_and_add_bank
+is_low_valid		jmp	_is_low_valid
+is_high_valid		jmp	_is_high_valid
+;**************************************************************************
+SINE_TABLE	; Pass this table an index from 0-8 in w, and it will return
+		; a positive sine value corresponding to that index
+;**************************************************************************
+					;3
+	add	pc,w			;4
+	retw	0			;3,10
+	retw	1
+	retw	1
+	retw	2
+	retw	2
+	retw	2
+	retw	1
+	retw	1
+
+;*********************************************************
+update_refs	; This routine updates all the sine/cosine references
+		; and returns
+;*********************************************************
+					;3
+	bank	ref_bank		;1
+	jb	sample_lows,:do_low_frequencies	;4,8
+
+	add	ref_acc1_l,#f1209_l	
+	snc				
+	inc	ref_acc1_h		
+	add	ref_acc1_h,#f1209_h	
+	add	ref_acc2_l,#f1336_l	
+	snc				
+	inc	ref_acc2_h		
+	add	ref_acc2_h,#f1336_h	
+	add	ref_acc3_l,#f1477_l	
+	snc				
+	inc	ref_acc3_h		
+	add	ref_acc3_h,#f1477_h	
+	add	ref_acc4_l,#f1633_l	
+	snc				
+	inc	ref_acc4_h		
+	add	ref_acc4_h,#f1633_h	
+	retp	
+
+:do_low_frequencies
+
+	add	ref_acc1_l,#f697_l	;2
+	snc				;1
+	inc	ref_acc1_h		;1
+	add	ref_acc1_h,#f697_h	;2
+	add	ref_acc2_l,#f770_l	;2
+	snc				;1
+	inc	ref_acc2_h		;1
+	add	ref_acc2_h,#f770_h	;2
+	add	ref_acc3_l,#f852_l	;2
+	snc				;1
+	inc	ref_acc3_h		;1
+	add	ref_acc3_h,#f852_h	;2
+	add	ref_acc4_l,#f941_l	;2
+	snc				;1
+	inc	ref_acc4_h		;1
+	add	ref_acc4_h,#f941_h	;2,33 worst case
+
+	retp				;3,36 worst case,36 * 20ns = 720ns
+;*********************************************************
+DTMF_DETECT_CH_1 ; The first channel of DTMF detection
+; Before calling this routine, load the temp1 register
+; with new byte of received data.
+;*********************************************************
+					;3
+	mov	temp1,#DTMF_CH_1	;2
+
+
+;*********************************************************
+DTMF_DETECT_8kHz		
+;*********************************************************
+:calculate_frequency_1			;8
+	mov	temp2,in_byte		;2 move the input byte to temporary global registers
+	bank	ref_bank		;1
+	mov	w,ref_acc1_h		;1
+	call	calculate_sine_acc	;52 calculate the accumulator value for this reference 
+					; into the accumulator pointed to by temp1
+	inc	temp1			;1
+	inc	temp1			;1
+	mov	temp2,in_byte		;2 move the input byte to temporary global registers
+	bank	ref_bank		;1
+	mov	w,ref_acc1_h		;1
+	call	calculate_cose_acc	;56 cycles worst case
+	inc	temp1			;1
+	inc	temp1			;1,128 cycles worst case
+:calculate_frequency_2
+	mov	temp2,in_byte		;2 move the input byte to temporary global registers
+	bank	ref_bank		;1
+	mov	w,ref_acc2_h		;1
+	call	calculate_sine_acc	;52 calculate the accumulator value for this reference 
+					; into the accumulator pointed to by temp1
+	inc	temp1			;1
+	inc	temp1			;1
+	mov	temp2,in_byte		;2 move the input byte to temporary global registers
+	bank	ref_bank		;1
+	mov	w,ref_acc2_h		;1
+	call	calculate_cose_acc	;56
+	inc	temp1			;1
+	inc	temp1			;1,248 cycles worst case to here from call
+:calculate_frequency_3
+	mov	temp2,in_byte		; move the input byte to temporary global registers
+	bank	ref_bank
+	mov	w,ref_acc3_h
+	call	calculate_sine_acc	; calculate the accumulator value for this reference 
+					; into the accumulator pointed to by temp1
+	inc	temp1
+	inc	temp1
+	mov	temp2,in_byte		; move the input byte to temporary global registers
+	bank	ref_bank
+	mov	w,ref_acc3_h
+	call	calculate_cose_acc
+	inc	temp1
+	inc	temp1			;?,368 cycles worst case
+:calculate_frequency_4
+	mov	temp2,in_byte		; move the input byte to temporary global registers
+	bank	ref_bank
+	mov	w,ref_acc4_h
+	call	calculate_sine_acc	; calculate the accumulator value for this reference 
+					; into the accumulator pointed to by temp1
+	inc	temp1
+	inc	temp1
+	mov	temp2,in_byte		; move the input byte to temporary global registers
+	bank	ref_bank
+	mov	w,ref_acc4_h
+	call	calculate_cose_acc	;?,486 cycles worst case
+	retp				;3,489 cycles worst case
+
+DTMF_DETECT_DONE
+
+;**************************************************************************
+calculate_cose_acc			; calculate, but with a sine index
+					; which is offset by 90 degrees.
+;**************************************************************************
+	mov	temp3,w			;1
+	add	temp3,#$40		;2	
+	mov	w,temp3			;1,4 cycles
+;**************************************************************************
+calculate_sine_acc	; This routine uses an index in w, and an input byte in
+			; temp2 
+;**************************************************************************
+					;3
+	clr	temp3			;1
+	clrb	ref_sign		;1 update the ref_sign bit
+	snb	wreg.7			;1
+	setb	ref_sign		;1,7
+
+	swap 	wreg			;1 get the high nybble of the reference accumulator
+	and	w,#$07			;1 get rid of the highest bit (sign bit)
+	call	sine_table		;10 get the sine value for this index
+	snb	wreg.0			;1
+	jmp	ref_equals_1		;1 if wreg.0 is set, then the sine reference = 1
+	snb	wreg.1			;1
+	jmp	ref_equals_2		;3 if wreg.1 is set, then the sine reference = 2
+ref_equals_0				; if neither bit is set, no processing to do.
+	jmp	calculate_sine_done	; if the reference = 0, there is no accumulating to do.
+ref_equals_2
+	clc				;1
+	rl	temp2			;1 multiply by 2
+	rl	temp3			;1,28	
+ref_equals_1
+ADD_TO_ACC
+					; First check for negative add or positive add...
+	clr	wreg			;1,29 worst case
+	snb	ref_sign		;1
+	inc	wreg			;1
+	snb	input_sign		;1
+	inc	wreg			;1
+	sb	wreg.0			;1
+	jmp	:positive		;1 if the two signs make an even number,
+					;  sine_reference * input = positive value.
+:negative
+	not	temp2			;1 negate the input byte
+	not	temp3			;1
+	inc	temp2			;1
+	snz				;1
+	inc	temp3			;1,40 worst case
+:positive
+	mov	fsr,temp1		;2 point to the first accumulator to deal with
+	add	indf,temp2		;2 add the input * reference to the accumulator
+	mov	w,temp3			;1
+	inc	fsr			;1 point to the high byte of the accumulator
+	snc				;1
+	inc	indf			;1 and increment it if the add from the low byte caused a carry
+	add	indf,w			;1 add the high byte of the in_byte to the high byte of the accumulator.
+
+calculate_sine_done
+	retp				;3,52 worst case cycles ( calculate_sine_acc )
+
+;**************************************************************************
+_get_winner
+;	This routine starts at the beginning of the bank pointed to by
+;	temp1 and checks all of the results in the accumulators for the
+;	highest result.  It uses no global registers (except for temp1)
+;	and executes completely in its own bank.  On exit, the index to
+;	the winning accumulator is held in the winner register, and 
+;	its score is held in the high_score register.  The next-highest
+;	result is held in the runner-up score register.  This can be
+;	used to determine that there is enough range between the winning
+;	frequency and the second-place frequency to indicate a valid result.
+;**************************************************************************
+	mov	w,temp1
+	and	w,#$f0
+	mov	fsr,w
+	clr	runner_up_score_h
+	clr	runner_up_score_l
+	clr	winner
+	clr	bank_index
+	inc	fsr			
+	inc	fsr				; point at the low byte of the first cosine register
+	mov	high_score_l,indf
+	inc	fsr
+	mov	high_score_h,indf		; save cos_acc1 as the high score
+	inc	bank_index
+:loop
+	inc	fsr				; fsr--> sin_acc_l
+	inc	fsr				; fsr--> sin_acc_h
+	inc	fsr				; fsr--> cos_acc_l
+	inc	fsr				; fsr--> cos_acc_h
+	mov	w,indf
+	mov	w,high_score_h-w		; w = high_score_h - indf
+	jz	:hs_high_bytes_equal
+	jc	:check_runner_up		; if high_score_h >= indf ( carry set ), jump to :check_runner_up
+
+:beat_high_score
+	mov	runner_up_score_h,high_score_h
+	mov	runner_up_score_l,high_score_l
+	mov	high_score_h,indf
+	dec	fsr				; fsr--> cos_acc_l
+	mov	high_score_l,indf
+	mov	winner,bank_index
+	inc	fsr				; fsr--> cos_acc_h
+	jmp	:this_round_done
+:hs_high_bytes_equal
+	dec	fsr				; fsr--> cos_acc_l
+	mov	w,indf
+	mov	w,high_score_l-w
+	inc	fsr				; fsr --> cos_acc_h (where beat_high_score expects it)
+	jnc	:beat_high_score
+:check_runner_up
+	mov	w,indf
+	mov	w,runner_up_score_h-w		; w = runner_up - indf
+	jz	:ru_high_bytes_equal
+	jc	:this_round_done		; if runner_up >= indf ( carry set ), jump to :this_round_done
+:ru_high_bytes_equal
+	dec	fsr				; fsr--> cos_acc_l
+	mov	w,runner_up_score_l
+	mov	w,indf-w
+	jc	:beat_runner_up_2
+	jz	:beat_runner_up_2
+	inc	fsr				; fsr --> cos_acc_h (where beat_high_score expects it)
+	jmp	:this_round_done
+:beat_runner_up_2
+	inc	fsr
+:beat_runner_up
+	mov	runner_up_score_h,indf
+	dec	fsr
+	mov	runner_up_score_l,indf
+	inc	fsr
+:this_round_done
+	inc	bank_index
+	sb	bank_index.2			; if bank_index = 4, we are done.
+	jmp	:loop
+	retp
+;**************************************************************************
+;*********************************************************
+_square_and_add_bank
+;	This routine takes the bank pointed to by temp1,
+;	squares all of the results, and adds the sine
+;	and cosine squares together into the cosine register
+;	(only the top 16-bits)
+;*********************************************************
+absolute			; first turn all numbers into positives
+	mov	temp2,#8
+	mov	fsr,temp1
+:loop1
+	rl	indf		; clear the low byte of the sine accumulator
+	inc	fsr
+	rl	indf
+	mov	w,indf		; and turn the high byte positive
+	snb	indf.7
+	not	wreg
+	snb	indf.7
+	inc	wreg
+	mov	indf,w
+	inc	fsr
+	decsz	temp2	
+	jmp	:loop1
+
+square
+:loop	inc	temp1		; point to the high byte
+	mov	fsr,temp1
+	mov	w,indf		; and get it
+	bank	math_bank
+	mov	input,w		; move it into input and w
+	call	Multiply	; multiply input * w
+	mov	temp3,answer_h	; store the result
+	mov	temp2,answer_l	; store the result
+	mov	fsr,temp1	; point to the high byte
+	mov	indf,temp3	; store the result in the DTMF bank
+	dec	fsr		; point to the low byte
+	mov	indf,temp2	; store the result in the DTMF bank
+	inc	temp1		; point to the next low byte
+	mov	w,temp1		; check for roll-over
+	and	w,#$0f
+	sz			; if it has rolled-over, then exit
+	jmp	:loop	
+	mov	w,#16
+	sub	temp1,w		; put temp1 back where it started
+_add
+	mov	fsr,temp1	; point to the low byte of the
+:loop
+	mov	w,indf		; sine accumulator
+	clr	indf
+	inc	fsr
+	inc	fsr
+	add	indf,w		; add it to the low byte of the
+	dec	fsr		; cosine accumulator
+	mov	w,indf		; get the high byte of the sine
+				; accumulator
+	clr	indf
+	inc	fsr		; point to the high byte
+	inc	fsr
+	snc
+	inc	indf
+	add	indf,w		; add to the high byte of the cosine
+				; accumulator
+;	rr	indf		; and rotate right just in case it
+				; exceeded the register size
+	inc	fsr
+	mov	w,fsr
+	and	w,#$0f
+	sz
+	jmp	:loop
+	retp
+;*********************************************************
+_Multiply ; Multiply W by input
+;	INPUTS:		W * input
+;	OUTPUTS: 	16-bit output value in answer_l and answer_h
+;*********************************************************
+	setb	loop_count.3	;1
+	clr	answer_l	;1
+	clr	answer_h	;1 ;3
+:loop
+	clc			;1
+	snb	input.0	;1
+	add	answer_h,w	;1
+	rr	answer_h	;1
+	rr	answer_l	;1
+	rr	input		;1
+	decsz	loop_count	;1
+	jmp	:loop		;3	10=looptime (78 on exit)
+				;    	78 + 3 = 81
+	clc
+	rl	answer_l
+	rl	answer_h
+	retp			;3	82 + 3 = 84	ALWAYS!!!
+				;	for 16 bit result.
+	
+;*********************************************************
+_is_low_valid	; This routine subtracts the
+		; runner_up_score from the high_score and
+		; checks that it is above a threshold
+;*********************************************************
+	mov	fsr,temp1
+	mov	w,#low_th_l		; subtract the threshold from the high score
+	mov	w,high_score_l-w
+	mov	w,#low_th_h
+	sc				
+	inc	wreg
+	mov	w,high_score_h-w	; if the high score < threshold, the frequency is invalid
+	jnc	:frequency_invalid		
+:frequency_valid	
+	mov	w,channel_mask		; if the frequency is valid, then set the appropriate bit in the low_present flags
+	bank	ref_bank
+	or	low_present_flags,w
+
+	mov	w,temp1			; and save the value of this frequency into the upper two bits of the nybble
+	swap	wreg			; get the high nybble of the offset to the appropriate bank
+	rr	wreg			; divide it by 4
+	rr	wreg
+	and	w,#%00000011		; use the 2MSB's of the fsr to choose the appropriate register
+	dec	wreg			; but subtract 1 to start them at an offset of zero
+	mov	temp2,w			; save this offset in temp2
+	add	temp2,#digit_detected_1	; temp2-->digit_detected_1 + (offset to appropriate register for this channel)
+	mov	fsr,temp2
+	mov	w,#%11110011
+	snb	temp1.5
+	swap	wreg
+	and	indf,w			; get rid of the old values in the digit_detected register
+	mov	fsr,temp1		; get the winner
+	mov	w,winner		
+	rl	wreg
+	rl	wreg			; and rotate it left twice
+	and	w,#%00001100		; and out any extraneous bits
+	snb	temp1.5			; swap it if it should go in the upper nybble
+	swap	wreg
+	mov	temp3,w			; and save it in temp3
+	mov	fsr,temp2		; fsr-->appropriate digit_detected register
+	or	indf,temp3		; load the appropriate digit_detected register
+	retp
+:frequency_invalid
+	mov	w,channel_mask		; if the frequency is invalid, then clear the appropriate bit in the high_present flags
+	not	wreg
+	and	low_present_flags,w
+	retp
+;*********************************************************
+_is_high_valid	; This routine checks that the 
+		; high_score is above a threshold and is
+		; is at least 4 times greater than the runner_up
+;*********************************************************
+	;*********************************************************
+	; Create an index to the appropriate digit_detected register
+	;*********************************************************
+	mov	w,temp1		
+	swap	wreg			; get the high nybble of the offset to the appropriate bank
+	rr	wreg			; divide it by 4
+	rr	wreg
+	and	w,#%00000011		; use the 2MSB's of the fsr to choose the appropriate register
+	dec	wreg			; but subtract 1 to start them at an offset of zero
+	mov	temp2,w			; save this offset in temp2
+	add	temp2,#digit_detected_1	; temp2-->digit_detected_1 + (offset to appropriate register for this channel)
+	mov	temp3,winner		; get the winner for this bank and save in a global register
+
+	mov	fsr,temp1		; load fsr with appropriate bank
+	mov	w,#high_th_l		; subtract the threshold from the high score
+	mov	w,high_score_l-w
+	mov	w,#high_th_h
+	sc				
+	inc	wreg
+	mov	w,high_score_h-w	; if the high score < threshold, the frequency is invalid
+	jnc	:frequency_invalid		
+:frequency_valid_1
+	;*********************************************************
+	; we are here, so the accumulator for this frequency did surpass
+	; the threshold.  Check that it is 4 times greater than the next
+	; highest result (high_score / 2) > (runner_up * 2)
+	;*********************************************************
+	clc
+	rl	runner_up_score_l	; runner_up_score = runner_up_score*2
+	rl	runner_up_score_h
+	clc
+	rr	high_score_h		; high_score = high_score/2
+	rr	high_score_l
+
+	mov	w,runner_up_score_l
+	mov	w,high_score_l-w
+	mov	w,runner_up_score_h
+	sc
+	inc	wreg
+	mov	w,high_score_h-w
+	jnc	:frequency_invalid
+
+:frequency_valid_2			; first check that the last high frequency was valid
+	;*********************************************************
+	; now, first check that the last high frequency was valid.  
+	; If so, check that the last frequency and this frequency match.  
+	; If so, set the appropriate valid_digit flag.  After all of 
+	; this, save this frequency and set or clear the high_present_flag
+	; appropriately.
+	;*********************************************************
+	mov	w,channel_mask		; mask off the appropriate bit
+	bank	ref_bank	
+	and	w,high_present_flags	; check for a previous valid high frequency
+	jz	:no_valid_digit		; if not, then this digit cannot be valid
+	mov	fsr,temp2		; now check that the last frequency and this frequency match
+					; fsr--> digit_detected register
+	mov	w,indf			
+	snb	temp1.5			; if in 2nd, 4th, or 6th bank, swap the wreg to get the appropriate value 
+	swap	wreg			; (value stored in upper nybble)
+	xor	w,temp3			; compare this winner with the last value detected
+	and	w,#%00000011		; compare the last digit_detected register contents and this winner
+	jnz	:no_valid_digit
+:valid_digit
+	mov	fsr,temp1
+	mov	w,channel_mask
+	bank	ref_bank
+	and	w,low_present_flags	; if there is no low present, then don't indicate a valid digit
+	or	valid_digit_flags,w	; set the appropriate bit in the valid_digit_flags register
+	jmp	:frequency_valid_3
+:no_valid_digit				; make sure the valid_digit_flag is cleared for this channel because no valid digit was found.
+	mov	fsr,temp1		; get the mask again
+	mov	w,channel_mask
+	bank	ref_bank
+	not	wreg			; and use it to clear the appropriate bit in the valid_digit_flags
+	and	valid_digit_flags,w
+	jmp	:frequency_valid_3
+:frequency_valid_3			; now save the value of this most recent frequency in the appropriate digit_detected register
+	mov	fsr,temp2		; fsr--> desired digit_detected register
+	mov	w,#%11111100
+	snb	temp1.5
+	swap	wreg			; swap the wreg to and into the appropriate locations
+	and	indf,w
+	mov	w,temp3			; now load the appropriate location with the winner
+	snb	temp1.5
+	swap	wreg
+	or	indf,w
+	mov	fsr,temp1
+	mov	w,channel_mask
+	bank	ref_bank		; now indicate that this last frequency was valid
+	or	high_present_flags,w
+	jmp	:is_high_valid_out
+:frequency_invalid
+	mov	fsr,temp1		; first clear the valid_digit_flags bit
+	mov	w,channel_mask
+	bank	ref_bank
+	not	wreg
+	and	valid_digit_flags,w	
+	and	high_present_flags,w	; and also clear the high_present_flags
+:is_high_valid_out
+	retp
+
+	org	$600
+;**************************************************************************
+get_next_byte
+; This routine waits for another word of data to be received from the 
+; serial data bus.  When the entire word is received (should be in temp4 and
+; temp5), 
+;**************************************************************************
+	jnb	new_data_flag,$			;7 wait for a new data
+	;break
+
+	xor	rb,#%00001000
+	nop
+	nop
+	xor	rb,#%00001000
+
+	clrb	new_data_flag			;1 clear the indication flag
+	clrb	input_sign			;1 clear the input sign flag
+	sb	temp5.7				;1
+	jmp	:positive			;1 if the incoming byte is negative, invert it.
+	not	temp4				;1
+	not	temp5				;1
+	inc	temp4				;1
+	snz					;1
+	inc	temp5				;1
+	setb	input_sign			;1,17 and indicate that the byte is negative
+:positive
+	mov	w,#$f0				;1
+	and	w,temp5				;1
+	sz					;1
+	jmp	:too_big			;1
+	mov	w,temp4				;1 now take the middle-2 8 bits from the sixteen bit value
+	swap	wreg				;1 as in (xxxxxxXXXXXXXXxx)
+	and	w,#$0f				;1
+	mov	in_byte,w			;1
+	mov	w,temp5				;1
+	swap	wreg				;1
+	and	w,#$f0				;1
+	or	in_byte,w			;1,34 and load them into in_byte
+	retp
+:too_big
+	mov	in_byte,#$ff
+	retp
+		
+;**************************************************************************
+clear_bank	; Clears an entire bank of RAM.
+		; To use, first load the FSR with the starting address 
+		; of the bank to clear.
+;**************************************************************************
+:loop
+	clr	indf
+	inc	fsr
+	sb	fsr.4
+	retp
+	jmp	:loop	
+
+
+
+

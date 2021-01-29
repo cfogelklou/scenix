@@ -1,0 +1,1808 @@
+; Filename:	sx_recv_mod_2_0.src
+; Author:	Stephen Holland and Chris Fogelklou
+;		Applications Engineers
+;		Scenix Semiconductor Inc.
+; Revision:	2.0
+; Date:		Dec. 14, 1998
+; Part:		SX28AC rev. 2.5
+; Freq:		50Mhz
+; Compiled using Parallax SX-Key software v01.0
+;
+; Revision History:  As this was a heavily modified version of the old
+; 		     DTMF DETECTION software with other additions added
+;		     over time, I have called it version 2.0.  Version
+;		     3.0 coding will be far more modular and smaller,
+;		     although the general operation will be the same.
+;		     version 4.0 will have a brand new DTMF detection
+;		     algorithm and will need new hardware surrounding it.
+;    
+; Known Bugs:	    -Problem with DTMF algorithm in this software causes
+;		     many receive bugs.  Newer DTMF IO software is less prone
+;		     to these errors for an unknown reason.
+;		    -Random CallerID problem causes name to be printed in some
+;		     weird fashion, but it always appears the same, so problem
+;		     is definitely software related and hard to find.	
+;*************************************************************
+; Device
+;*************************************************************
+		device	pins28,pages4,banks8,oschs
+		device	turbo,stackx,optionx
+		id	'RCVMOD20'
+		reset	reset_entry
+		freq	50_000_000
+;
+; Watches
+;
+	;	watch	result,8,udec
+	watch	fsk_rx_count,8,udec
+	watch	fsk_bit_count,8,udec
+
+;*************************************************************
+; Variables
+;*************************************************************
+glitch		equ	20
+lowlow		equ	40
+lowhigh		equ	96
+highlow		equ	97
+highhigh	equ	160
+startlength	equ	128
+stoplength	equ	210
+
+interrupt_rate	equ	-163
+		org	8
+
+temp		ds	1
+flags		ds	1
+byte		ds	1
+hex		ds	1
+cmd		ds	1
+state		ds	1
+number_low	ds	1
+
+rx_flag		=	flags.0		;receive flag
+tx_flag		=	flags.1		;transmit flag
+timer_flag	=	flags.2
+fsktx_flag	=	flags.3		;Enable FSK generation
+int_flag	=	flags.4		;Indicates interrupt just occurred
+fskrx_flag	=	flags.5		;Indicates a FSK receive occurred
+rcven_flag	=	flags.6		;Enable FSK receiver
+dtmfen_flag	=	flags.7		;Enable DTMF detectors
+
+;*************************************************************
+; Bank 0 variables
+;*************************************************************
+		org	$10	
+
+backup		=	$
+
+
+fsr_backup	ds	1
+
+timers		=	$
+
+ring_flags	ds	1
+ring_det_en	equ	ring_flags.3
+
+timer_accl	ds	1
+timer_acch	ds	1
+
+timer1_accl	ds	1
+timer1_acch	ds	1
+
+serial          =       $                       ;UART bank
+
+string		ds	1
+tx_high		ds      1  			;hi byte to transmit
+tx_low 		ds      1   			;low byte to transmit
+tx_high_buf	ds      1  			;hi byte buffer to transmit
+tx_count	ds      1 			;number of bits sent
+tx_divide       ds      1 			;xmit timing (/16) counter
+rx_count        ds      1  			;number of bits received
+rx_divide       ds      1  			;receive timing counter
+rx_byte         ds      1  			;buffer for incoming byte
+plus_count	ds	1
+
+;*************************************************************
+; Bank 1 variables
+;*************************************************************
+		org	$30
+
+fsk_receive_bank	=	$
+fsk_transmit_bank	=	$
+
+fsk_past_state		ds	1	; This is the past state of the fsk pin, to watch for transitions
+fsk_flags		ds	1
+
+	fsk_last_bit	equ	fsk_flags.0 ; This is the last bit received, to be processed by the processing function
+	fsk_receiving	equ	fsk_flags.1
+	fsk_gettn_start	equ	fsk_flags.2
+	ringing		equ	fsk_flags.3 	; used by the get_ring to see if the timers should be decremented.
+	second_ring	equ	fsk_flags.4	; get_cid should only be called after the first ring.  If this bit is
+						; set, then get_cid should not be called.
+	fsk_transmitting equ	fsk_flags.5
+	fsk_tx_bit	equ	fsk_flags.6	; This bit is set/cleared by the UART which times the fsk transmit.		
+	waiting_for_transition	equ	fsk_flags.7
+				; FSK Receive Registers
+fsk_rx_count		ds	1
+fsk_bit_count		ds	1	; This counter counts how long between each transition on the pin
+fsk_bit_delay		ds	1	; The delay between each bit.... also set this up for the start bit.
+fsk_rcv_byte		ds	1
+no_ring_counter		ds	1	; This counts the amount of time between rings.  If it is in excess of 10 seconds, then the person
+				; hung up and restart the caller ID process.
+
+				; FSK Transmit Registers
+fsk_tx_byte		ds	1		; This is the byte to be sent by the transmitter
+fsk_tx_mask		equ	fsk_rx_count	; This is a mask, used by the UART transmit the byte by FSK 
+fsk_table_index 	equ	fsk_bit_count	; This is an index into the FSK table, which points to the byte which is currently 
+					; being output by the PWM
+fsk_pwm_output		equ	no_ring_counter	; This is the current output of the PWM.
+;fsk_bit_delay		equ	fsk_bit_delay
+fsk_pwm_counter		ds	1		; This is the PWM counter, which allows the PWM to work.
+fsk_table_counter	ds	1
+fsk_tx_counter		ds	1
+
+
+cid_bank1	=	$
+
+cid_flags	ds	1
+	cid_U_received	equ	cid_flags.2
+	transition_occured	equ	cid_flags.3
+	outputting_number	equ	cid_flags.4
+	done_after		equ	cid_flags.5
+char_count	ds	1
+
+;*************************************************************
+; Bank 2 variables
+;*************************************************************
+		org	$50
+
+dtmf_gen	=	$
+
+freq_a		ds	1
+acc_a		ds	1
+sin_a		ds	1
+vel_a		ds	1
+
+freq_b		ds	1
+acc_b		ds	1
+sin_b		ds	1
+vel_b		ds	1
+
+pin_level	ds	1
+acc		ds	1
+tens_ms		ds	1
+time		ds	2
+bitmask		ds	1
+outstate	ds	1
+delay		ds	1
+
+;*************************************************************
+; Bank 3 variables
+;*************************************************************
+		org	$70
+
+dtmf_det1	=	$
+fsk_bank	=	$
+
+phase1		equ	$70
+sin1		equ	$71
+cos1		equ	$72
+result1		equ	$73
+dtmf_delay1	equ	$74
+
+phase2		equ	$75
+sin2		equ	$76
+cos2		equ	$77
+result2		equ	$78
+dtmf_delay2	equ	$79
+
+phase3		equ	$7a
+sin3		equ	$7b
+cos3		equ	$7c
+result3		equ	$7d
+dtmf_delay3	equ	$7e
+
+lo_or_hi	equ	$7a
+fsk_duty	equ	$7b
+fsk_period	equ	$7c
+counter_fsk	equ	$7d
+;fsk_tx_byte	equ	$7e
+bit_cnt		equ	$7f
+
+;*************************************************************
+; Bank 4 variables
+;*************************************************************
+		org	$90	
+
+dtmf_det2	=	$
+
+phase4		ds	1
+sin4		ds	1
+cos4		ds	1
+result4		ds	1
+dtmf_delay4	ds	1
+
+phase5		ds	1
+sin5		ds	1
+cos5		ds	1
+result5		ds	1
+dtmf_delay5	ds	1
+
+phase6		ds	1
+sin6		ds	1
+cos6		ds	1
+result6		ds	1
+dtmf_delay6	ds	1
+
+;*************************************************************
+; Bank 5 variables
+;*************************************************************
+		org	$b0	
+
+dtmf_det3	=	$
+
+phase7		ds	1
+sin7		ds	1
+cos7		ds	1
+result7		ds	1
+dtmf_delay7	ds	1
+
+phase8		ds	1
+sin8		ds	1
+cos8		ds	1
+result8		ds	1
+dtmf_delay8	ds	1
+
+testreg		ds	1
+testreg2	ds	1
+key		ds	1
+key2		ds	1
+dtmf_status	ds	1
+sav_key		ds	1
+
+;*************************************************************
+; Bank 6 variables
+;*************************************************************
+		org	$d0	
+
+dtmf_string	=	$
+
+		ds	12
+temp1		ds	1
+
+cid_bank	=	$
+
+;*************************************************************
+; Bank 7 variables
+;*************************************************************
+		org	$f0	
+
+dtmf_dial_bank	=	$
+cid_bank2	=	$
+
+cid_string	ds	15
+cid_counter	ds	1		
+	
+dtmf_string	=	cid_string
+dtmf_counter	=	cid_counter
+
+
+
+;*************************************************************
+; Declarations
+;*************************************************************
+
+;
+; FSK Receive equates
+;
+start_bit	=	200
+stop_bit	=	40
+divide_line	=	90
+
+; DTMF detection constants
+c697		=	110	;697 Hz tested OK! was 110
+c770		=	100	;770 Hz tested OK! was 100
+c852		=	90	;852 Hz tested OK!
+c941		=	81	;941 Hz tested OK!
+c1209		=	63	;1209 Hz tested OK!
+c1336		=	57	;1336 Hz tested OK!
+c1477		=	52	;1477 Hz tested OK!
+c1633		=	47	;1633 Hz
+
+; Pin assignments
+pwm_pin		=	ra.0
+rx_pin		=	ra.1
+tx_pin		=	ra.2
+in_out		=	ra.3
+
+led_pin		=	rb.0
+ring		=	rb.3
+hook		=	rb.4
+gs0		=	rb.5
+gs1		=	rb.6
+gs2		=	rb.7
+
+; The following three values determine the UART baud rate.
+; The value of baud_bit and int_period affect the baud rate as follows:
+;  Baud rate = 50MHz/(2^baud_bit * int_period * RTCC_prescaler)
+;       Note:   1 =< baud_bit =< 7
+;               *int_period must <256 and longer than the length of the slowest
+;                       possible interrupt sequence in instruction cycles.
+;                       Changing the value of int_period will affect the
+;                       rest of the virtual peripherals due to timing issues.
+; The start delay value must be set equal to (2^baud_bit)*1.5 + 1
+
+; *** 2400 baud
+;baud_bit	=	7			;for 2400 baud
+;start_delay	=	128+64+1		; "    "    "
+; *** 19200 baud
+baud_bit	=	4                       ;for 19200 baud
+start_delay	=	16+8+1                  ; "    "     "
+;int_period	=	163                     ; "    "     "
+
+;*************************************************************
+; Macros
+;*************************************************************
+enable_o	macro	0
+		clrb	in_out
+		endm
+
+disable_o	macro	0
+		setb	in_out
+		endm
+
+;delaymacro	macro	1
+;		bank	timers
+;		mov	timer_acch,#255-(\1*1000/20/255/163)
+;		mov	timer_accl,#255-(\1*12750/163-((\1*1000/20/255/163)*65025))
+;		clrb	timer_flag
+;		jnb	timer_flag,$
+;		endm
+delaymacro	macro	1
+		bank	timers
+		mov	timer_acch,#$fe
+		mov	timer_accl,#$ff
+		clrb	timer_flag
+		jnb	timer_flag,$
+		endm
+
+;*************************************************************
+; Interrupt routine - virtual peripherals
+;*************************************************************
+			org	0
+interrupt					;3 it takes 3 cycles to get an interrupt
+		bank	backup			;1	;Backup FSR and IND registers
+		mov	fsr_backup,fsr		;2
+
+;*************************************************************
+; Timers
+;*************************************************************
+timer		bank	timers			;1
+		add	timer_accl,#1		;2 add timer_accl+carry(=1)
+		sc
+		jmp	:timer_out
+
+		add	timer_acch,#1
+		sc				;1
+		jmp	:timer_out
+		setb	timer_flag		;1
+		
+:timer_out					;=7
+		movb	led_pin,timer_acch.7
+
+;*************************************************************
+; DTMF Detector
+;*************************************************************
+DTMF1
+		jnb	dtmfen_flag,DTMF_out	;3	;Execute DTMF detector 1 only when enabled
+
+		mov	w,<<rc			;1	;negative feedback
+		not	w			;1
+		mov	rc,w			;1
+
+		bank	dtmf_det1
+		inc	dtmf_delay1
+		cjne	dtmf_delay1,#c697,:next
+		clr	dtmf_delay1
+
+		mov	w,#sin1			;1	;
+		snb	phase1.0		;1
+		mov	w,#cos1			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase1		;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1	;
+		inc	ind			;1
+
+		incsz	phase1			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin1.7,:sinpos
+		not	sin1
+		inc	sin1			;4
+:sinpos
+		jnb	cos1.7,:cospos
+		not	cos1
+		inc	cos1			;4
+:cospos
+		mov	w,sin1
+		add	w,cos1
+		mov	result1,w		;3
+
+		setb	phase1.5
+		clr	sin1
+		clr	cos1			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF2		inc	dtmf_delay2
+		cjne	dtmf_delay2,#c770,:next
+		clr	dtmf_delay2
+
+		mov	w,#sin2			;1
+		snb	phase2.0			;1
+		mov	w,#cos2			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase2			;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase2			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin2.7,:sinpos
+		not	sin2
+		inc	sin2			;4
+:sinpos
+		jnb	cos2.7,:cospos
+		not	cos2
+		inc	cos2			;4
+:cospos
+		mov	w,sin2
+		add	w,cos2
+		mov	result2,w		;3
+
+		setb	phase2.5
+		clr	sin2
+		clr	cos2			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF3		inc	dtmf_delay3
+		cjne	dtmf_delay3,#c852,:next
+		clr	dtmf_delay3
+
+		mov	w,#sin3			;1
+		snb	phase3.0			;1
+		mov	w,#cos3			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase3			;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase3			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin3.7,:sinpos
+		not	sin3
+		inc	sin3			;4
+:sinpos
+		jnb	cos3.7,:cospos
+		not	cos3
+		inc	cos3			;4
+:cospos
+		mov	w,sin3
+		add	w,cos3
+		mov	result3,w		;3
+
+		setb	phase3.5
+		clr	sin3
+		clr	cos3			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF4		bank	dtmf_det2
+		inc	dtmf_delay4
+		cjne	dtmf_delay4,#c941,:next
+		clr	dtmf_delay4
+
+		mov	w,#sin4			;1
+		snb	phase4.0			;1
+		mov	w,#cos4			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase4			;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase4			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin4.7,:sinpos
+		not	sin4
+		inc	sin4			;4
+:sinpos
+		jnb	cos4.7,:cospos
+		not	cos4
+		inc	cos4			;4
+:cospos
+		mov	w,sin4
+		add	w,cos4
+		mov	result4,w		;3
+
+		setb	phase4.5
+		clr	sin4
+		clr	cos4			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF5		inc	dtmf_delay5
+		cjne	dtmf_delay5,#c1209,:next
+		clr	dtmf_delay5
+
+		mov	w,#sin5			;1
+		snb	phase5.0		;1
+		mov	w,#cos5			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase5		;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase5			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin5.7,:sinpos
+		not	sin5
+		inc	sin5			;4
+:sinpos
+		jnb	cos5.7,:cospos
+		not	cos5
+		inc	cos5			;4
+:cospos
+		mov	w,sin5
+		add	w,cos5
+		mov	result5,w		;3
+
+		setb	phase5.5
+		clr	sin5
+		clr	cos5			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF6		inc	dtmf_delay6
+		cjne	dtmf_delay6,#c1336,:next
+		clr	dtmf_delay6
+
+		mov	w,#sin6			;1
+		snb	phase6.0		;1
+		mov	w,#cos6			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase6		;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase6			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin6.7,:sinpos
+		not	sin6
+		inc	sin6			;4
+:sinpos
+		jnb	cos6.7,:cospos
+		not	cos6
+		inc	cos6			;4
+:cospos
+		mov	w,sin6
+		add	w,cos6
+		mov	result6,w		;3
+
+		setb	phase6.5
+		clr	sin6
+		clr	cos6			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF7		bank	dtmf_det3
+		inc	dtmf_delay7
+		cjne	dtmf_delay7,#c1477,:next
+		clr	dtmf_delay7
+
+		mov	w,#sin7			;1
+		snb	phase7.0		;1
+		mov	w,#cos7			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase7		;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase7			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin7.7,:sinpos
+		not	sin7
+		inc	sin7			;4
+:sinpos
+		jnb	cos7.7,:cospos
+		not	cos7
+		inc	cos7			;4
+:cospos
+		mov	w,sin7
+		add	w,cos7
+		mov	result7,w		;3
+
+		setb	phase7.5
+		clr	sin7
+		clr	cos7			;3
+
+		jmp	:dtmfdone		;4
+:next
+DTMF8		inc	dtmf_delay8
+		cjne	dtmf_delay8,#c1633,:next
+		clr	dtmf_delay8
+
+		mov	w,#sin8			;1
+		snb	phase8.0		;1
+		mov	w,#cos8			;1
+		mov	fsr,w			;1
+
+		mov	w,rc			;1
+
+		xor	w,phase8		;1	;inc/dec sin/COS
+		and	w,#$02			;1
+		sub	ind,w			;1
+		inc	ind			;1
+
+		incsz	phase8			;1
+:dtmfdone	jmp	:next			;3 /19
+
+		jnb	sin8.7,:sinpos
+		not	sin8
+		inc	sin8			;4
+:sinpos
+		jnb	cos8.7,:cospos
+		not	cos8
+		inc	cos8			;4
+:cospos
+		mov	w,sin8
+		add	w,cos8
+		mov	result8,w		;3
+
+		setb	phase8.5
+		clr	sin8
+		clr	cos8			;3
+
+		jmp	:dtmfdone		;4
+:next
+		jmp	interrupt_out
+DTMF_out
+
+;*************************************************************
+; D/A Conversions
+;*************************************************************
+
+;*************************************************************
+; UARTs
+;*************************************************************
+; Terminal UART
+		bank    serial                  ;switch to serial register bank
+
+:transmit       clrb	tx_divide.baud_bit	;clear xmit timing count flag
+		inc	tx_divide 		;only execute the transmit routine
+		stz      			;set zero flag for test
+		snb	tx_divide.baud_bit	; every 2^baud_bit interrupt
+		test	tx_count 		;are we sending?
+		jz	:receive		;if not, go to :tx_next
+		clc				;yes, ready stop bit
+		rr	tx_high			; and shift to next bit
+		rr	tx_low			;
+		dec	tx_count		;decrement bit counter
+		movb	tx_pin,/tx_low.6	;output next bit
+		test	tx_count
+		jnz	:receive
+
+:tx_next	test	tx_high_buf		;Only setup for next byte if there is one...
+		jz	:receive
+		not	tx_high_buf
+		mov	tx_high,tx_high_buf	;Setup TX to send buffered byte
+		mov	tx_count,#10		;Setup bit count
+		setb	tx_low.7		;Setup start bit
+		clr	tx_high_buf	
+
+:receive        movb	c,rx_pin		;get current rx bit
+		test	rx_count		;currently receiving byte?
+		jnz	:rxbit			;if so, jump ahead
+		mov	w,#9			;in case start, ready 9 bits
+		sc				;skip ahead if not start bit
+		mov	rx_count,w		;it is, so renew bit count
+		mov	rx_divide,#start_delay	;ready 1.5 bit periods
+:rxbit          djnz	rx_divide,:uartdone	;middle of next bit?
+		setb	rx_divide.baud_bit	;yes, ready 1 bit period
+		dec	rx_count		;last bit?
+		sz				;if not
+		rr	rx_byte 		;  then save bit
+		snz				;if so
+		setb	rx_flag			;  then set flag
+:uartdone
+
+;*************************************************************
+; FSK receive
+;*************************************************************
+FSK_detect
+		jnb	rcven_flag,FSK_detect_out ;3	;Execute FSK receiver only when enabled
+		bank	fsk_receive_bank
+		jb	fsk_transmitting,@fsk_transmit	;If we are transmitting, skip the receive code.
+		call	@receive			;or else, do the receive code.
+fsk_transmit_ret
+FSK_detect_out
+
+;*************************************************************
+interrupt_out
+		bank	backup			;1	;Restore FSR and IND registers
+		mov	fsr,fsr_backup		;2
+
+		setb	int_flag		;1	;Indicate interrupt just occurred
+
+		mov	w,#interrupt_rate	;1	;interrupt every 163 clocks
+		retiw				;3
+
+
+;*************************************************************
+; Reset entry
+;*************************************************************
+reset_entry	mov	m,#$0f
+		mov	 ra,#%0110		;init ra
+		mov	!ra,#%0010		;ra0-1 = input, ra2-3 = output
+		mov	 rb,#%00000000		;init rb
+		mov	!rb,#%00001110		;rb1-3 = input, rb0,rb4-7 = output
+		mov	 rc,#%00000000		;init rc
+		mov	!rc,#%01111101		;rc0,rc2-7 = input, rc1 = output
+
+		mov	m,#$0c	
+		mov	!rb,#%11111101		;enable Schmidt trigger on rb1
+
+		mov	m,#$0d	
+		mov	!rb,#%11111101		;make rb1 cmos-level
+		mov	!rc,#%11111110		;make rc0 cmos-level
+		mov	m,#$0f
+		disable_o
+
+		clr	fsr			;reset all ram banks
+:loop		setb	fsr.4
+		clr	ind
+		ijnz	fsr,:loop
+
+		bank	dtmf_gen
+		mov	delay,#23
+		mov	bitmask,#10000001b
+
+		bank	fsk_bank			
+		setb	lo_or_hi.0		;Set PWM to transmit 1200Hz
+
+		clr	flags
+
+		mov	!option,#%00011111	;enable wreg and rtcc interrupt
+
+		jmp	@main			;Jump to main code
+
+;*************************************************************
+; Subroutines 
+;*************************************************************
+		org	$200
+;*************************************************************
+; Jump table for page 1
+;*************************************************************
+DTMF_generate	jmp	DTMF_generation
+dtmf_detect	jmp	dtmf_detect_
+dtmf_pin	jmp	dtmf_pin_
+dtmf_tx		jmp	dtmf_tx_
+
+;*************************************************************
+; UART routines 
+;*************************************************************
+;
+; Get byte via serial port
+;
+get_byte	bank	serial
+	        jnb	rx_flag,$		;wait till byte is received
+		clrb	rx_flag			;reset the receive flag
+		mov	byte,rx_byte		;store byte (copy using W)
+		retp
+;
+; Send byte via serial port
+;
+send_byte	bank	serial
+
+:wait		test	tx_count		;wait for not busy
+		jnz	:wait
+
+		not	w			;ready bits
+		mov	tx_high,w
+		setb	tx_low.7
+		mov	tx_count,#10		;1 start + 8 data + 1 stop bit
+		retp
+;
+;
+; Send string at w
+;
+send_string	bank	serial
+		mov	string,w		;send string at w
+		mov	w,#13			;send cr
+		call	@send_byte
+		mov	w,#10			;send lf
+		call	@send_byte
+:loop		mov	w,string		;read chr at w
+		mov	m,#4
+		iread
+		mov	m,#$F
+
+		test	w			;if 0, exit
+		snz
+		retp
+
+		call	@send_byte		;not 0, send chr
+		inc	string			;next chr
+		jmp	:loop
+;
+; Send hex byte (2 digits)
+;
+send_hex
+:num_only	mov	w,<>number_low		;send first digit
+		call	:digit
+
+		mov	w,number_low		;send second digit
+
+:digit		and	w,#$f			;read hex chr
+		mov	temp,w
+		mov	w,#_hex
+		clc
+		add	w,temp
+		mov	m,#4
+		iread
+		mov	m,#$f
+
+		jmp	send_byte		;send hex chr
+;
+; Convert hex to keypad digit
+;
+hex_to_digit
+		mov	temp,w
+
+		mov	w,#_digit
+		clc
+		add	w,temp
+		mov	m,#4
+		iread
+		mov	m,#$F
+		retp
+;
+; Make byte uppercase
+;
+uppercase	csae	byte,#'a'
+		retp
+
+		sub	byte,#'a'-'A'
+		retp
+
+;*************************************************************
+; DTMF Generation
+;*************************************************************
+;
+; DTMF output - requires 20MHz clock
+;
+;   * 7-bit resolution
+;   * 246KHz delta modulation
+;   * frequency range: 0 to 2550Hz in 10Hz increments
+;   * output duration: 0 to 2550ms in 10ms increments
+;
+; in:   freq_a (byte) must hold 1st frequency ö 10 (i.e. 770Hz = #77)
+;   freq_b (byte) must hold 2nd frequency ö 10 (i.e. 1209Hz = #121)
+;   tens_ms (byte) must hold milliseconds ö 10 (i.e. 50ms = #5)
+;   (bitmask and fsr must point to pin and port)
+;
+; Frequency constant formula:     c = Freq/(20000000/4/61/256/32) = Freq/10.00
+;
+;                                 ³    ³       ³     ³ ³   ³  ³
+;          frequency constant ÄÄÄÄÙ    ³       ³     ³ ³   ³  ³
+;                                      ³       ³     ³ ³   ³  ³
+;                desired frequency ÄÄÄÄÙ       ³     ³ ³   ³  ³
+;                                              ³     ³ ³   ³  ³
+;              cpu clock frequency ÄÄÄÄÄÄÄÄÄÄÄÄÙ     ³ ³   ³  ³
+; cpu clocks per instruction cycle ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÙ ³   ³  ³
+;      instruction cycles per loop ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÙ   ³  ³
+;         maximum loops per sample ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÙ  ³
+;             samples per sinewave ÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÙ
+;
+;
+;
+; DTMF pin update - 9 cycles
+;
+
+DTMF_generation
+
+		mov	!ra,#%0010	;Enable pwm output
+		mov	!option,#%01011111	;disable rtcc interrupt
+
+		mov	w,#-20h		;set sines to minimums
+		mov	sin_a,w		;(range is ñ20h)
+		mov	sin_b,w
+
+		clr	vel_a		;reset sine velocities
+		clr	vel_b
+
+		not	tens_ms		;not tens_ms for inc'inc
+		jmp	:begin		;jmp to :begin
+
+:loop
+		mov	temp,delay	;Delay loop
+		djnz	temp,$
+		
+		call	@dtmf_pin	;2+9   ;update pin - 11 cycles
+
+		add	acc_a,freq_a	;2	;step sine #a now? - 9 cycles
+		mov	w,++vel_a	;1	;(c=1 if time to step sine)
+		sb	sin_a.7		;1	;get velocity +1 or -1 into w,
+		mov	w,--vel_a	;1	;...according to sine's sign
+		snc			;1	;if c=1, update velocity
+		mov	vel_a,w		;1 	;...by storing w into velocity
+		snc			;1	;if c=1, update sine
+		add	sin_a,w		;1	;...by adding w (ñ?) into sine
+
+		mov	temp,delay	;Delay loop
+		djnz	temp,$
+
+		call	@dtmf_pin	;2+9 	;update pin - 11 cycles
+
+		add	acc_b,freq_b	;2 	;step sine #b now? - 9 cycles
+		mov	w,++vel_b	;1 	;(c=1 if time to step sine)
+		sb	sin_b.7		;1 	;get velocity +1 or -1 into w,
+		mov	w,--vel_b	;1	;...according to sine's sign
+		snc			;1 	;if c=1, update velocity
+		mov	vel_b,w		;1	;...by storing w into velocity
+		snc				;1	;if c=1, update sine
+		add	sin_b,w		;1	;...by adding w (ñ?) into sine
+
+		mov	temp,delay	;Delay loop
+		djnz	temp,$
+
+		call	@dtmf_pin	;2+9	;update pin - 11 cycles
+
+		add	w,sin_a		;1 	;sum sines, loop - 10 cycles
+		add	w,sin_b		;1  	;(dtmf_pin returned 40h in w)
+
+		mov	pin_level,w	;1	;40h + ñ20h + ñ20h = 00h to 80h
+
+		clr	wdt		;1	;clear watchdog timer
+		nop			;1	;make 61 cycles/loop
+
+		inc	time+0		;1 	;loop until 10ms elapses
+		snz			;1
+		incsz	time+1		;1
+		jmp	:loop		;2,(1)
+
+:begin		mov	time+0,#0cch	;(2)	;(re)load 10ms into time
+		mov	time+1,#0fch	;(2)	;820 * 61 * 200ns = 10.00ms
+
+		ijnz	tens_ms,:loop	;(3)	;count tens_ms, exit if done
+
+		mov	!ra,#%0011	;Disable pwm output
+		mov	!option,#%00011111	;enable rtcc interrupt
+
+		retp			;(every 10ms +6 cycles - okay)
+
+dtmf_pin_	clrb	acc.7		;1	;clear acc 'carry'
+		add	acc,pin_level	;2 	;add pin_level into acc
+		mov	w,outstate	;1	;(new pin state is in acc.7)
+		snb	acc.7		;1	;get low-pin or high-pin port
+		or	w,bitmask	;1 	;...output value into w
+		mov	temp,w		;1	;write w to port to update pin
+		movb	ra.0,temp.7
+		mov	w,#40h		;2	;return 40h for sine summing
+		retp
+
+;*************************************************************
+dtmf_tx_
+		bank	timers
+		mov	!option,#%01011111	;disable rtcc interrupt
+		mov	timer_accl,#$da		;50mS		
+		mov	timer_acch,#$b3		;--//--
+		mov	!option,#%00011111	;enable rtcc interrupt
+		clrb	timer_flag		;Clear overflow-flag
+		jnb	timer_flag,$		;Has timer expired?
+
+		bank	dtmf_gen
+		cje	cmd,#0,dtmf_tx_out
+		cje	cmd,#'*',send_star
+		cje	cmd,#'#',send_pound
+		cje	cmd,#'A',send_a
+		cje	cmd,#'B',send_b
+		cje	cmd,#'C',send_c
+		cje	cmd,#'D',send_d
+
+		mov	w,#48
+		mov	w,cmd-w			;Convert ASCII to decimal
+		mov	temp,w
+
+		mov	w,#row_lookup			;Lookup row frequency
+		add	w,temp
+		mov	m,#4
+		iread
+		bank	dtmf_gen
+		mov	freq_a,w
+
+		mov	w,#col_lookup			;Lookup column frequency
+		add	w,temp
+		mov	m,#4
+		iread
+		bank	dtmf_gen
+		mov	freq_b,w
+		mov	m,#$F
+		jmp	out
+
+send_star	bank	dtmf_gen
+		mov	freq_a,#94
+		mov	freq_b,#121
+		jmp	out
+send_pound	bank	dtmf_gen
+		mov	freq_a,#94
+		mov	freq_b,#134
+		jmp	out
+send_a		bank	dtmf_gen
+		mov	freq_a,#70
+		mov	freq_b,#163
+		jmp	out
+send_b		bank	dtmf_gen
+		mov	freq_a,#77
+		mov	freq_b,#163
+		jmp	out
+send_c		bank	dtmf_gen
+		mov	freq_a,#85
+		mov	freq_b,#163
+		jmp	out
+send_d		bank	dtmf_gen
+		mov	freq_a,#94
+		mov	freq_b,#163
+		jmp	out
+
+out		mov	tens_ms,#10
+		enable_o
+		call	@DTMF_generate
+		disable_o
+
+	;	jmp	dtmf_tx
+dtmf_tx_out
+		retp
+
+;*************************************************************
+;*************************************************************
+dtmf_detect_
+		mov	!rc,#%11111101		;Enable DTMF output
+		disable_o			;Enable the input
+		bank	dtmf_string
+		mov	fsr,#dtmf_string
+:continue
+		setb	hook			;Open phone line
+
+		bank	dtmf_det3
+		clrb	dtmf_status.0
+check		bank	dtmf_det1		;Initialize DFT registers
+		clr	result1
+		clr	result2
+		clr	result3
+		bank	dtmf_det2
+		clr	result4
+		clr	result5
+		clr	result6
+		bank	dtmf_det3
+		clr	result7
+		clr	result8
+:test_loop
+		bank	serial
+		test	tx_count
+		sz
+		jmp	:test_loop
+		bank	timers
+		mov	!option,#%01011111	;disable rtcc interrupt
+		mov	timer_accl,#$de		;45mS		
+		mov	timer_acch,#$c9		;--//--
+		mov	!option,#%00011111	;enable rtcc interrupt
+		clrb	timer_flag		;Clear overflow-flag
+		setb	dtmfen_flag		;Enable DTMF detectors
+		jnb	timer_flag,$		;Has timer expired?
+		clrb	timer_flag
+		clrb	dtmfen_flag		;Disable DTMF detectors
+; Tree search
+;
+; r697   r770  r852  r941
+;     \ /     /     /
+;   testreg  /     /
+;         \ /     /
+;     testreg    /
+;           \   /
+;          testreg
+;
+; r1209  r1336 r1477 r1633
+;     \ /     /     /
+;  testreg2  /     /
+;         \ /     /
+;    testreg2    /
+;           \   /
+;          testreg2
+;
+		bank	dtmf_det3
+		clr	key
+		bank	dtmf_det1
+:rtest1		mov	temp,result1		;Load r697 into testreg as default
+		cjb	result1,result2,:rtest2	;Compare
+		jmp	:rtest3			;r697 is greater
+
+:rtest2		mov	temp,result2		;Load r770 into testreg if greater
+		bank	dtmf_det3
+		mov	key,#4
+		bank	dtmf_det1
+
+:rtest3		cja	temp,result3,:rtest4	;Compare
+		mov	temp,result3		;r852 is greater
+		bank	dtmf_det3
+		mov	key,#8
+
+:rtest4		bank	dtmf_det2
+		cja	temp,result4,:ctest1	;Compare
+		mov	temp,result4		;r941 is greater
+		bank	dtmf_det3
+		mov	key,#12
+
+:ctest1		bank	dtmf_det3
+		clr	key2
+		mov	testreg,temp	
+		bank	dtmf_det2
+		mov	temp,result5		;Load r1209 into testreg2 as default
+		cjb	result5,result6,:ctest2	;Compare
+		jmp	:ctest3			;r1209 is greater
+
+:ctest2		mov	temp,result6		;Load r1336 into testreg2 if greater
+		bank	dtmf_det3
+		mov	key2,#1
+
+:ctest3		bank	dtmf_det3
+		cja	temp,result7,:ctest4	;Compare
+		mov	temp,result7		;r1477 is greater
+		bank	dtmf_det3
+		mov	key2,#2
+
+:ctest4		cja	temp,result8,:done	;Compare
+		mov	temp,result8		;r1633 is greater
+		mov	key2,#3
+
+:done		mov	testreg2,temp
+		add	key,key2
+
+greatest	;jb	dtmf_status.0,wait_for_bad
+		cja	testreg2,#44,:highgood	;Is highest highband result higher than some threshold?	
+:bad		jmp	check
+
+:highgood	cja	testreg,#36,lowgood	;Is highest lowband result higher than some threshold?	
+		jmp	:bad
+
+lowgood		setb	dtmf_status.0		;Set DTMF status bit - ensures digit only gets sent once
+		mov	w,key			;Load w with hex offset to digit
+		call	@hex_to_digit		;Convert to decimal
+		mov	temp,w
+		mov	sav_key,w
+
+		call	@send_byte
+
+		bank	dtmf_string
+		mov	ind,temp
+		jmp	check
+
+wait_for_bad	cjb	testreg2,#25,:bad	;Is highest highband result higher than some threshold?	
+;		cjb	testreg,#1,:bad
+		jmp	check
+
+:bad		bank	dtmf_det3
+		clrb	dtmf_status.0
+		mov	w,sav_key
+		mov	cmd,w
+		cje	cmd,#'*',dtmf_detect_out	
+		inc	fsr
+		mov	w,temp
+
+		jmp	check
+
+dtmf_detect_out
+		bank	dtmf_string
+		mov	ind,#0			;NULL terminate dtmf string in RAM
+		clrb	hook			;Close phone line
+		retp
+
+
+;*************************************************************
+; Jump table for page 2
+;*************************************************************
+		org	$400
+;*************************************************************
+;wait		jmp	wait_
+receive		jmp	receive_
+
+;*************************************************************
+; Data
+;*************************************************************
+
+_hello		dw	13,10,'Receive Modem V 2.0',0
+_q		dw	'd -> DTMF det.',13,10,'f -> FSK Demod',13,10,'t -> CID test',13,10,0
+_prompt		dw	13,'>',0
+_dtmf		dw	'DTMF RX mode.',13,10,'>',0
+_hex		dw	'0123456789ABCDEF'
+_digit		dw	'123A456B789C*0#D'
+_wait		dw	'Err',13,10,0; Press D again to dial
+_rate		dw	'123',0
+_ring		dw	'RING ',13,10,0
+_cid_date	dw	13,10,'Date:   ',0
+_cid_time	dw	13,10,'Time:   ',0
+_cid_number	dw	13,10,'Number: ',0
+_cid_name	dw	13,10,'Name:   ',0
+_hangup		dw	'Hangup please...',13,10,0
+_modem		dw	'FSK Input:',13,10,0
+org	$500
+_fsk_table	dw	5,5,6,5,4,3,2,3
+
+
+; DTMF generation constants
+row_lookup	dw	94,70,70,70,77,77,77,85,85,85
+;row1		=	70	;697 Hz
+;row2		=	77	;770 Hz
+;row3		=	85	;852 Hz
+;row4		=	94	;941 Hz
+
+col_lookup	dw	134,121,134,148,121,134,148,121,134,148
+col1		=	121	;1209 Hz
+col2		=	134	;1336 Hz
+col3		=	148	;1477 Hz
+col4		=	163	;1633 Hz
+
+;************************************************************************************************************
+;************************************************************************************************************
+receive_					; Part of Interrupt !
+;************************************************************************************************************	
+	
+		bank	fsk_receive_bank
+
+		add	fsk_bit_count,#1	; Regardless of what is going on, increment the 
+		snc				; timers.  These get cleared when a transition takes
+		jmp	:error			; place
+		cjb	fsk_bit_count,#95,:fsk_timer_out
+		setb	rb.7
+		setb	fsk_last_bit
+		
+
+:fsk_timer_out
+
+		mov	w,rb
+		and	w,#%00000010		; get the current state of rb.
+		xor	w,fsk_past_state	; compare it with the previous state of the pin
+		jz	:no_transition		; if there was no change, then jump out, there is nothing to do.
+		
+						; Now it is time to determine if the transition that took place indicates a bit was received
+						; (it must be within some thresholds...  Those would be 
+						; Ideal Counts:
+						; High Freq.: 70 counts
+						; Low Freq.: 128 counts
+						; First check it to see if it is a low frequency...  It must be above 230 counts.
+
+
+		cjb	fsk_bit_count,#20,:glitch_so_ignore	; pulse was below specs, ignore it... probably noise
+		cjb	fsk_bit_count,#40,:error		; pulse was not a glitch but wasn't long enough to mean anything... huh?
+		cjb	fsk_bit_count,#95,:high_frequency	; pulse was within specs for a high frequency...
+		cjb	fsk_bit_count,#140,:low_frequency	; pulse was within specs for a low frequency
+		jmp	:error					; pulse was too long to mean anything, so do nothing.
+		
+
+:low_frequency
+		setb	fsk_last_bit			; a low frequency corresponds to high data.	
+		setb	rb.7
+		jmp	:fsk_receive_done
+:high_frequency						; a high frequency corresponds to low data.
+		clrb	fsk_last_bit
+		clrb	rb.7
+		jmp	:fsk_receive_done
+:error
+		clrb	fsk_receiving			; just in case we were receiving a byte, this will cancel the receive.
+							; NO ERRORS ALLOWED!
+:fsk_receive_done			
+		clr	fsk_bit_count			; clear the bit counter.
+:glitch_so_ignore					; don't clear the counter if the data was a glitch
+		mov	w,rb				; save the new state of the pin.
+		and	w,#%00000010
+		mov	fsk_past_state,w
+;********************************************************************************************************
+; This line separates the frequency detection from the UART.
+;********************************************************************************************************
+
+:no_transition						; Now it is time to do logic on what is being received.  
+							; This is basically a receive UART, which takes the bits 
+							; set by the previous routine (which is a frequency detector)
+							; and rotates them into a receive register (rcv_byte)
+		jb	fsk_receiving,:get_more_bits	; If we are already receiving, get more bits, dammit!
+		jb	fsk_last_bit,:fsk_rx_done	; if there is a HIGH present on the line,
+							; we have not yet received a START, so just quit.
+:start_woohoo						; We are not yet receiving, but a start is present, so
+							; Time to start receiving!  Yay!
+		mov	fsk_bit_delay,#135		; start bit...
+		mov	fsk_rx_count,#8			; bit counter.
+		setb	fsk_receiving
+		setb	fsk_gettn_start
+		jmp	:fsk_rx_done
+:get_more_bits						; Time to get some bits, man!!
+		dec	fsk_bit_delay
+		sz
+		jmp	:fsk_rx_done
+		snb	fsk_gettn_start			; if we are getting the start
+							; bit, then we need to reload
+							; the register with 255 (ignore the rollover)
+		jmp	:fsk_clr_start			; just ignore the rollover
+:rbdone		
+		mov	w,rb				; toggle rb.6 to see what is going on
+		and	w,#%01000000
+		clrb	rb.6
+		snz
+		setb	rb.6
+		clr	fsk_bit_delay			; set up for next bit.
+		dec	fsk_rx_count
+		jz	:all_done_so_check_stop		; if all the bits have been received, then wait for the stop.
+		jb	fsk_rx_count.7,:finally_done	; if fsk_bit_count.7 is set, then it has rolled over and we are done receiving.
+:adscs_ret	clc	
+		snb	fsk_last_bit
+		stc
+		rr	fsk_rcv_byte			; rotate the data into the rcv_byte.
+:fsk_rx_done	retp
+
+:fsk_clr_start	clrb	fsk_gettn_start			; clear this reg, since we are no longer getting a start bit.
+		retp
+
+:all_done_so_check_stop					; now check to see if the stop bit is present.  
+							; If not, then ERROR!
+
+		mov	fsk_bit_delay,#225		; not actually done, move a value in that will land us early on
+							; into the stop bit, so we can accurately get the next value.
+							; If we are getting low data, invalid stop bit so don't set rx_flag.
+		jmp	:adscs_ret
+
+:finally_done
+		jb	fsk_last_bit,:stop
+		clr	fsk_rx_count
+		jmp	:no_stop	
+:stop		clrb	fsk_receiving
+		setb	fskrx_flag
+:no_stop	retp
+;*************************************************************
+
+;*************************************************************
+
+;*************************************************************
+;*************************************************************
+		org	$600
+;*************************************************************
+;*************************************************************
+; Subroutines used by get_cid
+send_fsk	bank	fsk_receive_bank
+		jnb	fskrx_flag,$
+		clrb	fskrx_flag
+		mov	w,fsk_rcv_byte
+		call	@send_byte
+		ret
+next_digit
+		bank	cid_bank2
+		dec	fsr
+		mov	w,indf
+		call	@send_byte
+		ret
+
+;*************************************************************
+fsk_transmit
+
+:FSK_TX_UART
+		bank	fsk_transmit_bank		
+		dec	fsk_bit_delay		; Decrement the delay counter
+		sz
+		jmp	:FSK_UART_DONE		; if the delay counter rolls over, then 
+		stc
+		rr	fsk_tx_byte
+		sc
+		clrb	fsk_last_bit
+		snc
+		setb	fsk_last_bit
+		decsz	fsk_tx_counter
+		jmp	:FSK_UART_DONE
+		
+:FSK_DONE_TRANSMITTING
+		setb	fsk_last_bit
+		clrb	fsk_transmitting
+:FSK_UART_DONE
+;		jmp	@fsk_transmit_ret
+
+:FSK_FREQ_GEN	jb	fsk_last_bit,:is_high		; This part of the code looks up new values to be loaded into
+							; the PWM.  Every 30 counts for a 2.13kHz wave and every 18 counts 
+							; for a 1.28kHz wave
+							; Start of by checking if this has gone through a transition.  (eg it was
+							; a HIGH but now it's a LOW)
+
+:is_low		jnb	fsk_past_state.0,:no_change_lo
+		clc
+		rr	fsk_table_counter		; If the frequency went from a low frequency to a high frequency
+							; divide the table counter by two
+:no_change_lo	decsz	fsk_table_counter
+		jmp	:not_equal
+		mov	fsk_table_counter,#18
+		clr	fsk_pwm_counter
+		setb	pwm_pin
+		jmp	:inc_table
+
+:is_high	jb	fsk_past_state.0,:no_change_hi
+		clc
+		rl	fsk_table_counter		; If the frequency went from a high frequency to a low frequency
+							; multiply the table counter by two
+:no_change_hi	decsz	fsk_table_counter
+		jmp	:not_equal
+		mov	fsk_table_counter,#30
+		clr	fsk_pwm_counter
+		setb	pwm_pin
+		
+
+:inc_table	inc	fsk_table_index
+		and	fsk_table_index,#%00000111
+
+:load_pwm	page	_fsk_table
+		mov	w,#_fsk_table		; Load the table value which points to the current PWM output.
+		add	w,fsk_table_index
+		mov	m,#4
+		iread
+		mov	m,#$0F
+		and	w,#%00000111
+		mov	fsk_pwm_output,w		; Load the PWM output with a new value for the output.
+:not_equal		
+:FSK_PWM_DONE	mov	fsk_past_state,fsk_flags;
+		jmp	@fsk_transmit_ret
+
+
+;**************************************************************************************************************************
+;**************************************************************************************************************************
+
+;**************************************************************************************************************************
+;*************************************************************
+; Main 
+;*************************************************************
+; Main loop
+main
+		mov	w,#_hello		;send 'hello' string
+		call	@send_string
+		mov	w,#_q			;send 'q' string
+		call	@send_string
+		mov	w,#_prompt
+		call	@send_string
+		bank	fsk_receive_bank
+		clrb	ringing
+		clrb	second_ring
+		clrb	fsk_receiving
+		clrb	fsk_transmitting
+		clrb	rcven_flag
+
+main_
+		
+		jmp	get_ring
+get_ring_ret
+		jmp	time_out
+time_out_ret
+		jmp	at_commands
+at_commands_ret
+		jmp	main_
+
+;*************************************************************
+at_commands
+		bank	serial
+		jnb	rx_flag,at_commands_ret
+		clrb	rx_flag			;reset the receive flag
+		mov	byte,rx_byte		;store byte (copy using W)
+		call	@send_byte		;Echo to terminal
+		call	@uppercase
+
+		cje	byte,#'D',get_dtmf
+		cje	byte,#'F',get_fsk
+		cje	byte,#'A',a_atdt
+		jmp	@test_cid
+get_fsk_ret
+		jmp	at_commands_ret
+;**************************************************************************************************************************
+a_atdt
+		jnb	rx_flag,a_atdt
+		clrb	rx_flag
+		cjne	byte,#'T',:atdt_error
+
+:t_atdt		jnb	rx_flag,:t_atdt
+		clrb	rx_flag
+		cjne	byte,#'D',:atdt_error
+
+:d_atdt		jnb	rx_flag,:d_atdt
+		clrb	rx_flag
+		cje	byte,#'T',dtmf_dial
+:atdt_error
+		mov	w,#_wait
+		call	@send_string
+		jmp	at_commands_ret
+
+dtmf_dial
+
+		
+;**************************************************************************************************************************
+get_ring
+
+
+		bank	fsk_receive_bank
+
+		jnb	ring,:ringing			; if the RING line is low, then phone is ringing
+		jb	ringing,:check_to_see_if_done	; if the RING line is high, but it has been low recently, then 
+							; check to see if the timers have expired.
+		jmp	get_ring_ret
+
+:ringing
+		jb	ringing,:dont_write_ring	; if it just started ringing, write "RING"
+		mov	w,#_ring
+		call	@send_string
+:dont_write_ring
+		bank	fsk_receive_bank
+		setb	ringing
+		mov	no_ring_counter,#42
+
+		bank	timers
+		mov	timer_accl,#$55			
+		mov	timer_acch,#$55		;--//--
+		clrb	timer_flag
+
+		jmp	get_ring_ret
+
+:check_to_see_if_done
+		bank	timers
+		jnb	timer_flag,get_ring_ret
+:ring_done
+		clrb	timer_flag
+		bank	fsk_receive_bank
+		clrb	ringing
+		jnb	second_ring,get_cid		; if this was the first ring, then get caller_ID
+get_cid_ret
+		bank	fsk_receive_bank
+		setb	second_ring
+		jmp	get_ring_ret			; otherwise, just return to the main loop.
+		
+;*************************************************************
+time_out
+		bank	fsk_receive_bank
+		jb	ringing,time_out_ret
+		jnb	second_ring,time_out_ret
+		bank	timers
+		jnb	timer_flag,time_out_ret
+		clrb	timer_flag
+		bank	fsk_receive_bank
+		dec	no_ring_counter
+		snz	
+		clrb	second_ring
+		jmp	time_out_ret
+;*************************************************************
+get_dtmf
+		mov	w,#_dtmf		;send 'dtmf' string
+		call	@send_string
+		call	@dtmf_detect
+		jmp	main			;Return
+
+;*************************************************************
+
+;*************************************************************
+
+get_cid
+		clrb	dtmfen_flag				;Disable dtmf detectors
+		setb	rcven_flag
+		disable_o	
+		clrb	fskrx_flag
+		bank	fsk_receive_bank
+		clrb	cid_U_received
+		mov	no_ring_counter,#170
+
+:get_bytes							; First ensure that this is legal caller ID,
+			
+:no_timeout	bank	fsk_receive_bank				; meaning, it should start with a bunch of U's
+		jb	ring,:no_ring
+		inc	no_ring_counter
+		jnb	ring,$
+:no_ring	
+		test	no_ring_counter
+		jz	get_cid_out
+		jnb	fskrx_flag,:get_bytes
+		clrb	fskrx_flag
+		jb	rx_flag,get_cid_ret
+		jb	cid_U_received,:get_cid_start
+		cjne	fsk_rcv_byte,#'U',:get_bytes 		; get the U's.  When 4 U's are received, move on to the next step.
+		inc	cid_flags
+		jmp	:get_bytes
+
+:get_cid_start	mov	w,#_cid_date				;send 'dtmf' string
+		call	@send_string
+:get_start_loop
+		bank	fsk_receive_bank
+		jnb	fskrx_flag,$				; once we have the U's, get the date.
+		clrb	fskrx_flag				; output it as it is coming in.
+		clr	cid_flags
+		cje	fsk_rcv_byte,#$01,:output_time_date
+		cje	fsk_rcv_byte,#$04,:output_time_date_num	; after the U's comes a $04, meaning Caller ID start
+		cje	fsk_rcv_byte,#$02,:output_number
+		cje	fsk_rcv_byte,#$07,:output_name
+		jmp	:get_start_loop
+
+:output_time_date_num
+		setb	outputting_number
+		setb	done_after
+:output_time_date
+
+
+		jnb	fskrx_flag,$				; following the $04 is the size of the Caller ID string.
+	
+		clrb	fskrx_flag
+		mov	w,fsk_rcv_byte
+		mov	char_count,w
+		add	char_count,#-8				; Store the size of the CallerID string, minus the size of the date and time.
+		call	send_fsk				; Now send the first two digits of the date
+		call	send_fsk
+		mov	w,#'/'					; send a slash
+		call	@send_byte
+		call	send_fsk				; send the second two digits.
+		call	send_fsk
+
+		mov	w,#_cid_time
+		call	@send_string
+		call	send_fsk
+		call	send_fsk
+		mov	w,#':'
+		call	@send_byte
+		call	send_fsk
+		call	send_fsk
+		bank	fsk_receive_bank
+		jb	outputting_number,:output_num
+		jmp	:get_start_loop
+
+:output_num
+		mov	w,#_cid_number
+		call	@send_string
+
+:output_loop
+		bank	fsk_receive_bank
+		test	char_count
+		jz	:oloopout
+		call	send_fsk
+		bank	fsk_receive_bank
+		dec	char_count
+		jmp	:output_loop
+:oloopout	bank	fsk_receive_bank
+		jb	done_after,get_cid_out
+		jmp	:get_start_loop
+
+:output_name		
+		mov	w,#_cid_name
+		call	@send_string
+		bank	fsk_receive_bank
+		setb	done_after
+		jnb	fskrx_flag,$				; following the $04 is the size of the Caller ID string.
+		
+		clrb	fskrx_flag
+		mov	w,fsk_rcv_byte
+		mov	char_count,w
+		jmp	:output_loop
+		
+		
+:output_number	bank	fsk_receive_bank
+		jnb	fskrx_flag,$				; following the $04 is the size of the Caller ID string.
+		clrb	fskrx_flag
+		mov	w,fsk_rcv_byte
+		mov	char_count,w
+		jmp	:output_num		
+		
+get_cid_out	clrb	rcven_flag
+		jmp	get_cid_ret
+
+
+		
+;**************************************************************************************************************************
+test_cid	clrb	dtmfen_flag				;Disable dtmf detectors
+		setb	rcven_flag	
+		clrb	fskrx_flag
+		bank	fsk_receive_bank
+
+:loop		jnb	fskrx_flag,$
+		clrb	fskrx_flag
+		bank	fsk_receive_bank
+		cjb	fsk_rcv_byte,#$030,:send_in_hex
+		cjb	fsk_rcv_byte,#$03a,:send_the_byte
+		cjb	fsk_rcv_byte,#$041,:send_in_hex
+		cjb	fsk_rcv_byte,#$05b,:send_the_byte
+		cjb	fsk_rcv_byte,#$061,:send_in_hex
+		cjb	fsk_rcv_byte,#$07b,:send_the_byte
+		jmp	:send_in_hex
+
+:send_in_hex	mov	w,fsk_rcv_byte
+		mov	number_low,w
+		call	@send_hex
+		mov	w,#','
+		call	@send_byte
+		jmp	:loop
+
+:send_the_byte	mov	w,fsk_rcv_byte
+		call	@send_byte
+		mov	w,#','
+		call	@send_byte
+		jmp	:loop
+
+
+;**************************************************************************************************************************
+get_fsk
+		clrb	dtmfen_flag		;Disable dtmf detectors
+		bank	fsk_receive_bank
+		clrb	fsk_transmitting
+		disable_o			;Disable the outputs for receive
+		setb	hook
+		mov	w,#_modem		;send 'modem' string
+		call	@send_string
+		setb	rcven_flag		;Enable FSK receiver
+		bank	serial
+:again2		mov	plus_count,#3		
+
+:again
+		jb	fskrx_flag,:tx_byte
+		jnb	rx_flag,:again
+
+
+		bank	serial
+		clrb	rx_flag
+		mov	cmd,rx_byte
+		call	@send_byte
+		cjne	cmd,#'+',:again2
+		dec	plus_count
+		jnz	:again			;If +++ have not been received, then 
+
+:exit		clrb	rcven_flag		;Disable FSK receiver
+		clrb	hook
+		clrb	fskrx_flag
+		jmp	@main_
+
+:tx_byte	bank	fsk_receive_bank
+		clrb	fskrx_flag
+		mov	w,fsk_rcv_byte
+		call	@send_byte
+		jmp	:again
+		
+test_sine
+		jmp	main_
+
+
+		

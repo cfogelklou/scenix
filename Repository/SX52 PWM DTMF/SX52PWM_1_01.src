@@ -1,0 +1,1393 @@
+;*****************************************************************************************
+; Copyright © [11/21/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+; 
+; Filename:	SX52PWM_1_00.src
+;
+; Authors:	Chris Fogelklou
+;		Applications Engineer	
+;		Scenix Semiconductor, Inc.
+;		
+; Revision:	1.00
+;
+; Part:		SX52BD - AB9946AA
+; Freq:		50MHz
+;
+; Compiled using: SX-Key V. 1.19, SASM 1.44.6
+;
+; Date Written: March 28, 2000
+;
+; Last Revised: March 28, 2000
+;
+; Program Description:
+;
+;		Demonstrates generating a DTMF signal using the PWM capabilities of the
+;		SX-52.  Subroutines for using the timers on the SX-52 to generate PWM signals.
+;		Program tested using SX28-52 Evaluation board.  Board Mods:  removed SX-28
+;		and tied RB.6 to on-board PWM Filter Circuitry:
+;
+;		RB.6  PWM OUT >-------\/\/\-----x-----\/\/\-----x-------> Filtered PWM Out
+;				       10k      |      10k      |
+;				               ---             ---
+;				               --- 2.2nF       --- 2.2nF
+;				                |               |
+;				                |               |
+;					       ---             --- 
+;					        -               - 
+; Interface Pins:
+;
+;		PWM Output on rb.6
+;	
+; Revision History:
+;
+;		1.0 Subroutines added to generate DTMF on PWM output of SX-52
+;		1.01 Fixed some documentation
+;
+;
+;*****************************************************************************************
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+;SX28
+SX48_52
+;SX48_52_ES
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48/52/BD device directives for SX-Key
+		device	oschs2
+    ENDIF
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs2,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs2,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs2   
+    ENDIF
+  ENDIF
+ENDIF
+		id	'SX52PWM'	
+		reset	resetEntry	; set reset vector
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	To support compatibility between source code written for the SX28 and the SX52,
+	;	use macros.
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+
+_bank	macro	1
+	bank	\1
+
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+	    ELSE
+		clrb	fsr.7
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+
+	;*****************************************************************************************
+	; Macros for SX28/52 Compatibility
+	;*****************************************************************************************
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+	IFDEF SX48_52
+  expand
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+  noexpand
+	ELSE
+  expand
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+  noexpand					;and SX28AC
+	ENDIF
+	endm
+
+	;*****************************************************************************************
+	; INCP/DECP macros for incrementing/decrementing pointers to RAM
+	; used to compensate for incompatibilities between SX28 and SX52
+	;*****************************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	To support compatibility between source code written for the SX28 and the SX52,
+	;	use macros.  This macro compensates for the fact that RAM banks are contiguous in
+	;	the SX52, but separated by 0x20 in the SX18/28.
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+INCP	macro	1
+		inc	\1
+	IFNDEF	SX48_52
+		setb	\1.4		; If SX18 or SX28, keep bit 4 of the pointer = 1
+	ENDIF				; to jump from $1f to $30, etc.
+endm
+		
+DECP	macro	1
+	IFDEF	SX48_52
+		dec	\1
+	ELSE
+		clrb	\1.4		; If SX18 or SX28, forces rollover to next bank
+		dec	\1		; if it rolls over.  (Skips banks with bit 4 = 0)
+		setb	\1.4		; Eg:  $30 --> $20 --> $1f --> $1f
+	ENDIF				; AND: $31 --> $21 --> $20 --> $30
+endm
+
+	;*****************************************************************************************
+	; Error generating macros
+	; Used to generate an error message if the label is unintentionally moved into the 
+	; second half of a page.  Use for lookup tables.
+	;*****************************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	Surround lookup tables with the tableStart and tableEnd macros.  An error will
+	;	be generated on assembly if the table crosses a page boundary.
+	;	
+	;	Example:
+	;		lookupTable1
+	;			add	pc,w
+	;		tableStart
+	;			retw	0
+	;			retw	20
+	;			retw	-20
+	;			retw	-40
+	;		tableEnd
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+tableStart	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+tableEnd	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+
+		org     global_org
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	Use only these defined label types for global registers.  If an extra temporary 
+	;	register is required, adhere to these label types.  For instance, if two temporary
+	;	registers are required for the Interrupt Service Routine, use the label isrTemp1
+	;	for it.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+flags0		equ	global_org + 0  ; stores bit-wise operators like flags 
+						; and function-enabling bits (semaphores)
+
+flags1		equ	global_org + 1  ; stores bit-wise operators like flags 
+						; and function-enabling bits (semaphores)
+localTemp0	equ	global_org + 2	; temporary storage register
+						; Used by first level of nesting
+						; Never guaranteed to maintain data
+localTemp1	equ	global_org + 3	; temporary storage register	
+						; Used by second level of nesting
+						; or when a routine needs more than one 
+						; temporary global register.	
+localTemp2	equ	global_org + 4	; temporary storage register
+						; Used by third level of nesting or by
+						; main loop routines that need a loop 
+						; counter, etc.
+isrTemp0	equ	global_org + 5	; Interrupt Service Routine's temp register.  
+						; Don't use this register in the mainline.
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+
+bank0		=	$
+	
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Avoid using bank0 in programs written for SX48/52.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;	Tip 1:
+	;	Indicate which Virtual Peripherals a portion of source code or declaration belongs
+	;	to with a ;VP: VirtualPeripheralName comment.
+	;
+	;	Tip 2:
+	;	All RAM location declaration names should be
+	;   	- left justified
+	;	- less than 2 tabs in length
+	;	- written in hungarian notation
+	;	- prefixed by a truncated version of the Virtual Peripheral's name
+	;	
+	;	Examples:
+	;
+	;	;VP: RS232 Transmit
+	;
+	;	rs232TxBank	=       $                       ;RS232 Transmit bank
+	;
+	; 	rs232TxHigh	ds      1                       ;hi byte to transmit
+	;	rs232TxLow	ds      1                       ;low byte to transmit
+	;	rs232TxCount	ds      1                       ;number of bits sent
+	;	rs232TxDivide	ds      1                       ;xmit timing (/16) counter
+	;	rs232TxString	ds	1			;the address of the string to be sent
+	;	rs232TxByte	ds	1			;semi-temporary serial register
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+
+;VP: ISR Multithreader
+
+isrMultiplex	ds	1		; The isrMultiplex register is used to switch to a new
+					; execution thread on each pass of the ISR.
+;VP: DTMF generation
+
+sinGenBank	=	$
+sinAcc1Lo	ds	1	;phase accumulator used to generate DTMF modulation
+sinAcc1Hi	ds	1	;
+sinFreq1Lo	ds	1	;frequency variable for generating DTMF modulation
+sinFreq1Hi	ds	1	;
+sinAcc2Lo	ds	1	;phase accumulator used to generate DTMF modulation
+sinAcc2Hi	ds	1	;
+sinFreq2Lo	ds	1	;frequency variable for generating DTMF modulation
+sinFreq2Hi	ds	1	;
+
+pwmBank		equ	$
+
+pwmOutput	ds	1
+
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+bank3		=	$
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+
+bank4		=	$
+
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+
+bank5		=	$
+
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+
+bank6		=	$
+
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+
+bank7		=	$
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+
+bank8		=	$
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- This extra memory is not available in the SX18/28, so don't use it for Virtual
+	;	  Peripherals written for both platforms.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+
+bank9		=	$
+
+
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+
+bankA		=	$
+
+
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+
+bankB		=	$
+
+
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+
+bankC		=	$
+
+
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+
+bankD		=	$
+
+
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+
+bankE		=	$
+
+
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+
+bankF		=	$
+
+
+ENDIF
+		
+	;*********************************************************************************
+	; Pin Definitions:  
+	;*********************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Store all initialization constants for the I/O in the same area, so
+	;	  pins can be easily moved around.
+	;	- Pin definitions should follow the same format guidelines as RAM definitions
+	;		- Left justified
+	;		- Hungarian Notation
+	;		- Less that 2 tabs in length
+	;		- Indicate the Virtual Peripheral the pin is used for
+	;	- Only use symbolic names to access a pin/port in the source code.
+	;	- Example:
+	;		; VP: RS232 Transmit
+	;			rs232TxPin	equ	ra.3
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+RA_latch	equ	%00001000		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11110111		;SX18/20/28/48/52 port A DDIR value
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%00001000		;SX18/20/28/48/52 port A PLP value
+
+;VP: PWM Generation
+
+pwmOutPin      equ     rb.6		;PWM Output Pin
+
+RB_latch	equ	%00000000		;SX18/20/28/48/52 port B latch init
+RB_DDIR		equ	%10111111		;SX18/20/28/48/52 port B DDIR value
+RB_ST		equ	%11111111		;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111		;SX18/20/28/48/52 port B PLP value
+
+RC_latch	equ	%00000000		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%11111111		;SX18/20/28/48/52 port C DDIR value
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+
+IFDEF SX48_52	;SX48BD/52BD Port initialization values
+RD_latch	equ	%00000000		;SX48/52 port D latch init
+RD_DDIR		equ	%11111111		;SX48/52 port D DDIR value
+RD_ST		equ	%11111111		;SX48/52 port D ST value
+RD_LVL		equ	%00000000		;SX48/52 port D LVL value
+RD_PLP		equ	%00000000		;SX48/52 port D PLP value
+
+RE_latch	equ	%00000000		;SX48/52 port E latch init
+RE_DDIR		equ	%11111111		;SX48/52 port E DDIR value
+RE_ST		equ	%11111111		;SX48/52 port E ST value
+RE_LVL		equ	%00000000		;SX48/52 port E LVL value
+RE_PLP		equ	%00000000		;SX48/52 port E PLP value
+ENDIF
+
+;*****************************************************************************************
+; Program constants
+;*****************************************************************************************
+
+;VP: DTMF Generation
+;**************************************************************************
+; CALCULATING CONSTANTS FOR DTMF Generation
+;
+; The constant = 2^n * Ts * FREQ, 
+; where n is the number of bits in the phase accumulator for each
+; signal generator, Ts is the sample rate, and FREQ is the desired
+; output frequency.
+; We know that the phase accumulator (phaseAcc) is 16 bits, so n = 16
+;
+; = 1/([cyclesperinterrupt] * [instructiontime] * [ISR passes]) 
+;
+; Therefore, the constant = 2^n * (1/Fs) * FREQ
+;
+; Convert the result of the calculation to a hexadecimal number and load
+; the upper byte into the phaseAccHi register and the lower byte 
+;**************************************************************************
+IFDEF	SX_Key
+
+Fs = 19200				; sampling frequency for DTMF generation phase
+					; accumulator
+Bits = 65536				; 2^16 is the max value of the phase accumulator
+
+f697Lo		equ	((Bits * 697)/Fs) & $0ff	; low 8 bits of 16 bit constant
+f697Hi		equ	((Bits * 697)/Fs) >> 8		; high 8 bits of 16 bit constant
+
+f770Lo		equ	((Bits * 770)/Fs) & $0ff
+f770Hi		equ	((Bits * 770)/Fs) >> 8
+
+f852Lo		equ	((Bits * 852)/Fs) & $0ff
+f852Hi		equ	((Bits * 852)/Fs) >> 8
+
+f941Lo		equ	((Bits * 941)/Fs) & $0ff
+f941Hi		equ	((Bits * 941)/Fs) >> 8
+
+f1209Lo		equ	((Bits * 1209)/Fs) & $0ff
+f1209Hi		equ	((Bits * 1209)/Fs) >> 8
+
+f1336Lo		equ	((Bits * 1336)/Fs) & $0ff
+f1336Hi		equ	((Bits * 1336)/Fs) >> 8
+
+f1477Lo		equ	((Bits * 1477)/Fs) & $0ff
+f1477Hi		equ	((Bits * 1477)/Fs) >> 8
+
+f1633Lo		equ	((Bits * 1633)/Fs) & $0ff
+f1633Hi		equ	((Bits * 1633)/Fs) >> 8
+
+ELSE
+
+f697Lo		equ	$04b				; low 8 bits of 16 bit constant
+f697Hi		equ	$009				; high 8 bits of 16 bit constant
+
+f770Lo		equ	$044
+f770Hi		equ	$00a
+
+f852Lo		equ	$05c
+f852Hi		equ	$00b
+
+f941Lo		equ	$08b
+f941Hi		equ	$00c
+
+f1209Lo		equ	$01e
+f1209Hi		equ	$010
+
+f1336Lo		equ	$0d0
+f1336Hi		equ	$011
+
+f1477Lo		equ	$0b1
+f1477Hi		equ	$013
+
+f1633Lo		equ	$0c5
+f1633Hi		equ	$015
+
+ENDIF
+;-------------------------------------------------------------------------------------
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	To calculate the interrupt period in cycles:
+	;	- First, choose the desired interrupt frequency
+	;		- Should be a multiple of each Virtual Peripherals sampling frequency.
+	;		- Example:  19200kHz UART sampling rate * 16 = 307.200kHz
+	;	- Next, choose the desired oscillator frequency.
+	;		- 50MHz, for example.
+	;	- Perform the calculation int_period = (osc. frequency / interrupt frequency)
+	;				  		= (50MHz / 307.2kHz)
+	;						= 162.7604
+	;	- Round int_period to the nearest integer:
+	;						= 163
+	;	- Now calculate your actual interrupt rate:
+	;						= osc. frequency / int_period
+	;						= 50MHz / 163
+	;						= 306.748kHz
+	;	- This interrupt frequency will be the timebase for all of the Virtual 
+	;	  Peripherals
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+int_period	=	163	; Gives an interrupt period at 50MHz of (163 * (1/50000000)s) = 3.26us
+				; Which gives an interrupt frequency of (1/3.26us)Hz = 306.748kHz
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	- Include all calculations for Virtual Peripheral constants for any sample 
+	;	  rate.
+	;	- Relate all Virtual Peripheral constants to the sample rate of the Virtual
+	;	  Peripheral.
+	;	- Example:
+	;		; VP: 5ms Timer
+	;		TIMER_DIV_CONST	equ 192	; This constant = timer sample rate/200Hz = 192
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+;-------------------------------------------------------------------------------------
+IFDEF SX48_52
+	;*********************************************************************************
+	; SX48BD/52BD Mode addresses
+	; *On SX48BD/52BD, most registers addressed via mode are read and write, with the
+	; exception of CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Timer (read) addresses
+TCPL_R		equ	$00		;Read Timer Capture register low byte
+TCPH_R		equ	$01		;Read Timer Capture register high byte
+TR2CML_R	equ	$02		;Read Timer R2 low byte
+TR2CMH_R	equ	$03		;Read Timer R2 high byte
+TR1CML_R	equ	$04		;Read Timer R1 low byte
+TR1CMH_R	equ	$05 		;Read Timer R1 high byte
+TCNTB_R		equ	$06		;Read Timer control register B
+TCNTA_R		equ	$07		;Read Timer control register A
+
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_R		equ	$0A		;Read MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_R		equ	$0B		;Read MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_R		equ	$0C		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_R		equ	$0D		;Read Port Level setup, 0 = CMOS, 1 = TTL
+PLP_R		equ	$0E		;Read Port Weak Pullup setup, 0 = enabled, 1 = disabled
+DDIR_R		equ	$0F		;Read Port Direction
+
+; Timer (write) addresses
+TRCLR		equ	$10		;Clear Timer1 / Timer2
+TR2CML_W	equ	$12		;Write Timer R2 low byte
+TR2CMH_W	equ	$13		;Write Timer R2 high byte
+TR1CML_W	equ	$14		;Write Timer R1 low byte
+TR1CMH_W	equ	$15 		;Write Timer R1 high byte
+TCNTB_W		equ	$16		;Write Timer control register B
+TCNTA_W		equ	$17		;Write Timer control register A
+
+; Port setup (write) addresses
+WKED_W		equ	$1A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$1B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$1C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$1D		;Write Port Level setup, 0 = CMOS, 1 = TTL
+PLP_W		equ	$1E		;Write Port Weak Pullup setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$1F		;Write Port Direction
+
+ELSE
+
+	;*********************************************************************************
+	; SX18AC/20AC/28AC Mode addresses
+	; *On SX18/20/28, all registers addressed via mode are write only, with the exception of
+	; CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_W		equ	$0A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$0B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$0C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$0D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$0E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$0F		;Write Port Direction
+ENDIF
+
+GETCMP		equ	%01000000
+;*****************************************************************************************
+; Program memory ORG defines
+;*****************************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Place a table at the top of the source with the starting addresses of all of
+	;	  the components of the program.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+INTERRUPT_ORG		equ	$0	; Interrupt must always start at location zero
+RESET_ENTRY_ORG		equ	$1FB	; The program will jump here on reset.
+SUBROUTINES_ORG		equ	$200	; The subroutines are in this location
+PAGE3_ORG		equ	$400	; Page 3 is empty
+MAIN_PROGRAM_ORG	equ	$600	; The main program is in the last page of program memory.
+
+
+
+
+
+
+
+
+
+
+
+
+
+;****************************** Beginning of program space *******************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+	org	INTERRUPT_ORG			; First location in program memory.
+;*****************************************************************************************
+;------------------------------------------------------------------------------
+; Interrupt Service Routine
+;------------------------------------------------------------------------------
+; Note: The interrupt code must always originate at address $0.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;------------------------------------------------------------------------------
+ISR					;3	The interrupt service routine...
+
+;------------------------------------------------------------------------------
+;VP: VP Multitasker
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; - Multi-thread the Interrupt Service Routine
+	;	- Produces a FAR smaller worst-case cycle time count, and enables a larger number
+	;	  of VP's to run simultaneously.  Also produces "empty" slots that future VP's 
+	;	  can be copied and pasted into easily.
+	;	- Determine how often your tasks need to run.  (9600bps UART can run well at a 
+	;	  sampling rate of only 38400Hz, so don't run it faster than this.)
+	;	- Strategically place each "module" into the threads of the ISR.  If a module 
+	;	  must be run more often, just call it's module at double the rate or quadruple
+	; 	  the rate, etc.…
+	;	- Split complicated Virtual Peripherals into several modules, keeping the 
+	;	  high-speed portions of the Virtual Peripherals as small and quick as possible, 
+	;	  and run the more complicated, slower processing part of the Virtual Peripheral 
+	;	  at a lower rate.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	;------------------------------------------------------------------------------
+	; Virtual Peripheral Multitasker:  up to 16 individual threads, each running at
+	;				   the interrupt rate/16.  Change the number of jumps
+	;				   to a specific routine to change it's execution (sample)
+	;				   rate.
+	;
+	;	Input variable(s): isr_multiplex: variable used to choose threads
+	;	Output variable(s): 		None, executes the next thread
+	;	Variable(s) affected: 		isr_multiplex
+	;	Flag(s) affected: 		None
+	;	Program Cycles:			10 cycles (turbo mode)
+	;------------------------------------------------------------------------------
+	_bank	isrMultiplex		;2
+	inc	isrMultiplex		;1	; toggle interrupt rates
+	mov	w,isrMultiplex		;1
+; The code between the tableBegin and tableEnd statements MUST be 
+; completely within the first half of a page.  The routines 
+; it is jumping to must be in the same page as this table.
+tableStart				; Start all tables with this macro.
+	jmp	pc+w			;3
+	jmp	isrThread1		;3,9 cycles.
+	jmp	isrThread2		;
+	jmp	isrThread3		;
+	jmp	isrThread4		;
+	jmp	isrThread1		;
+	jmp	isrThread5		;
+	jmp	isrThread6		;
+	jmp	isrThread7		;
+	jmp	isrThread1		;
+	jmp	isrThread8		;
+	jmp	isrThread9		;
+	jmp	isrThread10		;
+	jmp	isrThread1		;
+	jmp	isrThread11		;
+	jmp	isrThread12		;
+	jmp	isrThread13		;
+tableEnd				; End all tables with this macro.
+
+
+;------------------------------------------------------------------------------
+;VP: VP Multitasker
+; ISR TASKS
+;------------------------------------------------------------------------------
+isrThread1		; Serviced at ISR rate / 4
+;------------------------------------------------------------------------------
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	The sample rate of this section of code is the isr rate / 4, because it is jumped
+	;	to in every 4th entry in the VP Multitaskers table.  To increase the
+	;	sample rate, put more calls to this thread in the Multitasker's jump table.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread2		; Serviced at ISR rate / 16 (19200)
+;------------------------------------------------------------------------------
+;VP: PWM Output (SX-52)
+
+	mov	w,m			
+	mov	isrTemp0,w		; save M register
+
+	page	pwmSetup
+	call	pwmSetup		; Output current PWM value...
+
+	mov	w,isrTemp0		; restore M register
+	mov	m,w
+
+
+;VP: DTMF Generation
+	_bank	sinGenBank
+	add	sinAcc1Lo,sinFreq1Lo		; update the phase accumulators
+	snc
+	inc	sinAcc1Hi
+	add	sinAcc1Hi,sinFreq1Hi
+	add	sinAcc2Lo,sinFreq2Lo
+	snc
+	inc	sinAcc2Hi
+	add	sinAcc2Hi,sinFreq2Hi
+
+	mov	w,<<sinAcc1Hi			; get sine value 1
+	clrb	isrTemp0.0
+	snc
+	setb	isrTemp0.0
+	swap	wreg
+	and	w,#%00001111
+	call	sineTable1
+	jnb	isrTemp0.0,:positive_1		; if sinAcc1Hi.7 == 1
+	not	w				; negate w register
+	inc	wreg
+:positive_1
+	mov	pwmOutput,w
+
+	mov	w,<<sinAcc2Hi			; get sine value 2
+	clrb	isrTemp0.0
+	snc
+	setb	isrTemp0.0
+	swap	wreg
+	and	w,#%00001111
+	call	sineTable2
+	jnb	isrTemp0.0,:positive_2		; if sinAcc2Hi.7 == 1
+	not	w				; negate w register
+	inc	wreg
+:positive_2
+	add	pwmOutput,w
+	add	pwmOutput,#128
+
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread3		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread4		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread5		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread6		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread7		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread8		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread9		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread10		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread11		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread12		; Serviced at ISR rate / 16
+;------------------------------------------------------------------------------
+	jmp	isrOut			;7 cycles until mainline program resumes execution
+
+;------------------------------------------------------------------------------
+isrThread13		; Serviced at ISR rate / 16
+;			; This thread must reload the isrMultiplex register 
+			; since it is the last one to run in a rotation.
+;------------------------------------------------------------------------------
+	bank	isrMultiplex
+	mov	isrMultiplex,#255	; Reload isrMultiplex so isrThread1 will be run
+					; on next interrupt.
+	jmp	isrOut
+;------------------------------------------------------------------------------
+
+	
+
+
+
+
+
+;------------------------------------------------------------------------------
+;VP: Signal Generation
+sineTable1			;3
+; It returns a value from the table, located at the location passed to 
+; it in W.
+;
+; INPUTS - Index into table in W register
+;
+; OUTPUTS - Value at Wth location in table stored in W
+;
+; REGISTERS MODIFIED - None
+;
+; PROGRAM CYCLES - 10 cycles from call.
+;
+;------------------------------------------------------------------------------
+; The code between the tableBegin and tableEnd statements MUST be 
+; completely within the first half of a page.  
+tableStart				; Start all tables with this macro.
+	jmp	pc+w		;3,7
+	retw	0
+	retw	14
+	retw	27
+	retw	39
+	retw	49
+	retw	58
+	retw	65
+	retw	69
+	retw	70
+	retw	69
+	retw	65
+	retw	58
+	retw	49
+	retw	39
+	retw	27
+	retw	14
+tableEnd				; End all tables with this macro.
+;------------------------------------------------------------------------------
+;VP: Signal Generation
+sineTable2			;3
+; It returns a value from the table, located at the location passed to 
+; it in W.
+;
+; INPUTS - Index into table in W register
+;
+; OUTPUTS - Value at Wth location in table stored in W
+;
+; REGISTERS MODIFIED - None
+;
+; PROGRAM CYCLES - 10 cycles from call.
+;
+;------------------------------------------------------------------------------
+; The code between the tableBegin and tableEnd statements MUST be 
+; completely within the first half of a page.  
+tableStart				; Start all tables with this macro.
+	jmp	pc+w		;3,7
+	retw	0
+	retw	11
+	retw	21
+	retw	31
+	retw	39
+	retw	46
+	retw	51
+	retw	54
+	retw	55
+	retw	54
+	retw	51
+	retw	46
+	retw	39
+	retw	31
+	retw	21
+	retw	11
+tableEnd				; End all tables with this macro.
+
+
+
+;------------------------------------------------------------------------------
+isrOut
+;------------------------------------------------------------------------------
+	mov	w,#-int_period	;1	; return and add -int_period to the RTCC
+	retiw			;3	; using the retiw instruction.
+
+;------------------------------------------------------------------------------
+
+
+;------------------------------------------------------------------------------
+;*****************************************************************************************
+org	RESET_ENTRY_ORG
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	The main program operation should be easy to find, so place it at the end of the 
+	;	program code.  This means that if the first page is used for anything other than 
+	;	main program source code, a reset_entry must be placed in the first page, along 
+	;	with a 'page' instruction and a 'jump' instruction to the beginning of the 
+	;	main program.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+;------------------------------------------------------------------------------
+resetEntry					; Program starts here on power-up
+	page	_resetEntry
+	jmp	_resetEntry
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	ORG statements should use predefined labels rather than literal values.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+
+
+org	SUBROUTINES_ORG
+;*****************************************************************************************
+; Subroutines
+;*****************************************************************************************
+;------------------------------------------------------------------------------
+;VP: PWM Output (SX-52)
+pwmSetup
+; Loads the value in the pwmOutput register into the timer/counter registers
+; to output the equivalent value on the sx-52's timer/counter pin...  RB.6 in 
+; this case
+;
+; INPUTS - pwmOutput = value to output:  (1 <= value <= 255)
+;
+; OUTPUTS - Sets up the timers to output the value in pwmOutput
+;
+; REGISTERS MODIFIED - W register, Mode register, Timer Registers
+;
+; PROGRAM CYCLES - 22 cycles from call.
+;
+;------------------------------------------------------------------------------
+				;3
+	_bank	pwmBank		;2 switch to PWM bank
+	_mode	TR2CML_W	;2 
+	mov	w,pwmOutput	;1
+	mov	!rb,w		;1 move pwmOutput to Timer2 Low Byte
+	_mode	TR1CML_W	;2 
+	mov	w,pwmOutput	;1 move negated version of pwmOutput to TR1 Low Byte
+	not	w		;1
+	inc	wreg		;1
+	mov	!rb,w		;1
+	_mode	TRCLR		;2 Clear the timers so they start at zero (May cause glitch...
+				; Hopefully not too bad!)
+	mov	w,#0		;1
+	mov	!rb,w		;1
+	retp			;3,22
+
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+;*****************************************************************************************
+org	PAGE3_ORG
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	To ensure that several Virtual Peripherals, when pasted together, do not cross 
+	;	a page boundary without the integrator's knowledge, put an ORG statement and one 
+	;	instruction at every page boundary.  This will generate an error if a pasted 
+	;	subroutine moves another subroutine to a page boundary.  
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	jmp	$	; This instruction will cause an assembler error if the source code before
+			; the org statement inadvertantly crosses a page boundary.
+
+
+
+
+
+
+
+
+
+
+
+
+;*****************************************************************************************
+org	MAIN_PROGRAM_ORG
+;*****************************************************************************************
+
+
+
+;------------------------------------------------------------------------------
+; RESET VECTOR 
+;------------------------------------------------------------------------------
+
+	;------------------------------------------------------------------------------
+	; Program execution begins here on power-up or after a reset
+	;------------------------------------------------------------------------------
+
+_resetEntry		
+	;------------------------------------------------------------------------------
+	; Initialize all port configuration
+	;------------------------------------------------------------------------------
+
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_ST            	;Setup RD Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_ST            	;Setup RE Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_LVL            	;Setup RD CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rd,w		
+		mov     w,#RE_LVL            	;Setup RE CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!re,w		
+ENDIF
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_PLP            	;Setup RD Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_PLP            	;Setup RE Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+IFDEF SX48_52
+		mov	w,#RD_DDIR		;Setup RD Direction register, 0 = output, 1 = input
+		mov	!rd,w			
+		mov	w,#RE_DDIR		;Setup RE Direction register, 0 = output, 1 = input
+		mov	!re,w			
+ENDIF
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+IFDEF SX48_52
+		mov     w,#RD_latch         	;Initialize RD data latch
+		mov     rd,w			
+		mov     w,#RE_latch         	;Initialize RE data latch
+		mov     re,w			
+ENDIF
+
+
+	;------------------------------------------------------------------------------
+	; Clear all Data RAM locations
+	;------------------------------------------------------------------------------
+
+zeroRam
+IFDEF SX48_52   				;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zeroRam	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zeroRam
+
+		_bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+ELSE     					;SX18/20/28 RAM clear routine
+		clr	fsr			;reset all ram banks
+:zeroRam	sb	fsr.4			;are we on low half of bank?
+		setb	fsr.3			;If so, don't touch regs 0-7
+		clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zeroRam
+ENDIF
+	;------------------------------------------------------------------------------
+	; Initialize program/VP registers
+	;------------------------------------------------------------------------------
+
+setupDTMF
+	_bank	sinGenBank		; Setup DTMF generation registers to output 697Hz in 
+	mov	sinFreq1Lo,#f697Lo	; combination with 1633Hz
+	mov	sinFreq1Hi,#f697Hi
+	mov	sinFreq2Lo,#f1633Lo
+	mov	sinFreq2Hi,#f1633Hi
+
+setupPWM
+	; First, set up timer T1 for output on RB.6
+	; Move a %11100001 into T1CNTB to enable timer t1 prescaler of 0 and PWM mode
+
+	_mode	TCNTB_W		; Address T1CNTB register through mode register
+	mov	!rb,#%11100001	; enable prescaler of 0 and PWM mode on RB.6
+	_mode	TR1CMH_W	; set high byte of 16 bit counter to 0
+	mov	!rb,#0
+	_mode	TR2CMH_W	; set high byte of 16 bit counter to 0
+	mov	!rb,#0
+
+	_bank	pwmBank
+	mov	pwmOutput,#128
+	
+
+	call	@pwmSetup	; Load the PWM registers to output 128	
+
+	;------------------------------------------------------------------------------
+	; Setup and enable RTCC interrupt, WREG register, RTCC/WDT prescaler
+	;------------------------------------------------------------------------------
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;	The suggested default values for the option register are:
+	;	- Bit 7 set to 0: location $01 addresses the W register (WREG
+	;	- Bit 5 set to 1: RTCC increments on internal transitions
+	;	- Bit 3 set to 1: Prescaler assigned to WatchDog Timer
+	;
+	;	If a routine must change the value of the option register (for example, to access
+	;	the RTCC register directly), then it should restore the default value for the 
+	;	option register before exiting.
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+RTCC_ON		=	%10000000	;Enables RTCC at address $01 (RTW hi)
+					;*WREG at address $01 (RTW lo) by default
+RTCC_ID		=	%01000000	;Disables RTCC edge interrupt (RTE_IE hi)
+					;*RTCC edge interrupt (RTE_IE lo) enabled by default
+RTCC_INC_EXT	=	%00100000	;Sets RTCC increment on RTCC pin transition (RTS hi)
+					;*RTCC increment on internal instruction (RTS lo) is default
+RTCC_FE		=	%00010000	;Sets RTCC to increment on falling edge (RTE_ES hi)
+					;*RTCC to increment on rising edge (RTE_ES lo) is default
+RTCC_PS_ON	=	%00000000	;Assigns prescaler to RTCC (PSA lo)
+RTCC_PS_OFF	=	%00001000	;Assigns prescaler to WDT (PSA lo)
+PS_000		=	%00000000	;RTCC = 1:2, WDT = 1:1
+PS_001		=	%00000001	;RTCC = 1:4, WDT = 1:2
+PS_010		=	%00000010	;RTCC = 1:8, WDT = 1:4
+PS_011		=	%00000011	;RTCC = 1:16, WDT = 1:8
+PS_100		=	%00000100	;RTCC = 1:32, WDT = 1:16
+PS_101		=	%00000101	;RTCC = 1:64, WDT = 1:32
+PS_110		=	%00000110	;RTCC = 1:128, WDT = 1:64
+PS_111		=	%00000111	;RTCC = 1:256, WDT = 1:128
+
+OPTIONSETUP	equ	RTCC_PS_OFF|PS_111	; the default option setup for this program.
+	mov	w,#OPTIONSETUP		; setup option register for RTCC interrupts enabled 
+	mov	!option,w		; and no prescaler.
+
+	page	mainloop
+	jmp	mainloop
+
+
+;*****************************************************************************************
+; Main Program Loop Here
+;*****************************************************************************************
+
+mainLoop
+				; Do nothing forever...
+				; Interrupt Service Routine generates DTMF signal.
+	jmp	mainLoop
+
+
+
+;*****************************************************************************************
+END		;End of program code
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************

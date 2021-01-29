@@ -1,0 +1,533 @@
+LmpInfoSeg		MACRO
+;********************************************************************************
+;  LMP LAYER
+;********************************************************************************
+;
+;	lap2lmpConnectIndication() call
+;	lap2lmpDisconnectIndication()
+;
+;	lap2lmpRxData(w=Data)				;Incomming data bytes
+;	lap2lmpRxValid() call				;Data bytes passed since RxFrame message are valid
+;	lap2lmpRxError() call				;Data bytes passed since RxFrame message are invalid
+;
+;	lap2lmpTxFrame(ret z=None) call
+;	lap2lmpTxData(ret w=Data ret z=Last) call	;Payload layer can accept a data byte (for an I frame) if there is one available. if there is data available then lmp returns data byte and sets z to false
+;	lap2lmpTxValid() call				;Lap layer is indicating that all data passed since last TxStart message was acknowledged
+;	lap2lmpTxError() call				;Lap layer is indicating that all data passed since last TxStart message will need to be sent again
+;
+;********************************************************************************
+			ENDM
+
+
+LmpDataSeg		MACRO
+;********************************************************************************
+;  LMP LAYER
+;********************************************************************************
+
+		org	$90
+
+lmpBank		= 	$90			;16 bytes
+
+lmpPosition	ds	1			;Position of multi byte stages
+lmpData		ds	1			;Temporary Data storage
+lmpAppLSAP	ds	1			;LSAP number of remote CommApp (or 0 if not connected)
+lmpAppStatus	ds	1
+
+lmpRxState	ds	1			;Current Rx state
+lmpRxDLSAP	ds	1			;Received DLSAP
+lmpRxSLSAP	ds	1			;Received SLSAP
+lmpRxInfo	ds	4
+
+lmpRxLMPCmdOpcode	=	lmpRxInfo + 0	;LMP Command frames : holds opcode
+lmpRxIASErrOpcode	=	lmpRxInfo + 0	;IAS frame : holds service request
+lmpRxIASErrRetCode	=	lmpRxInfo + 1	;IAS frame : holds return code for service request
+lmpRxSendStringL	=	lmpRxInfo + 2	;SendStringH = _lmpTxStringSegment
+lmpRxPostTest		=	lmpRxInfo + 3
+
+lmpTxState	ds	1			;Current Tx state
+lmpTxDLSAP	ds	1			;Transmit DLSAP = Received SLSAP
+lmpTxSLSAP	ds	1			;Transmit SLSAP = Received DLSAP
+lmpTxInfo	ds	2
+
+lmpTxIASErrOpcode	=	lmpTxInfo + 0	;IAS frame : holds service request
+lmpTxIASErrRetCode	=	lmpTxInfo + 1	;IAS frame : holds return code for service request
+lmpTxStringH		=	lmpTxInfo + 0
+lmpTxStringL		=	lmpTxInfo + 1
+
+lmpConnectCmdOpcode		= $01
+lmpConnectRspOpcode		= $81
+lmpDisconnectOpcode		= $02
+lmpAccessCmdOpcode		= $03
+lmpAccessRspOpcode		= $83
+
+lmpLSAPServer			= 0
+lmpLSAPComm			= 5			;Random number between 1 and 6F
+
+lmpAppRxFlag			= lmpAppStatus.0	;Indicates that app layer has been passed unacknoldged data
+lmpAppTxFlag			= lmpAppStatus.1	;Indicates that app layer is passing data or has passed data that has not yet been acknoldged
+
+lmpRxDataMode			= %00000000		;More data is required
+lmpRxVerifyMode			= %10000000		;Waiting for frame to complete
+
+lmpRxSLSAPState			= 1 + lmpRxDataMode	;Second byte = Source LSAP
+lmpRxLMPCmdOpcodeState		= 2 + lmpRxDataMode	;LMP Command : Opcode
+lmpRxIASCmdState		= 3 + lmpRxDataMode	;IAS Data :
+lmpRxIASClassLengthState	= 4 + lmpRxDataMode	;IAS Data :
+lmpRxIASClassTestState		= 5 + lmpRxDataMode	;IAS Data :
+lmpRxIASDeviceAttribState	= 6 + lmpRxDataMode	;IAS Data :
+lmpRxIASCommAttribState		= 7 + lmpRxDataMode	;IAS Data :
+lmpRxIASAttribTestState		= 8 + lmpRxDataMode	;IAS Data :
+lmpRxCommDataState		= 9 + lmpRxDataMode	;Comm Data
+
+lmpRxBadLSAPState		= 1 + lmpRxVerifyMode	;Error state : Invalid Dest LSAP
+lmpRxLMPCmdVerifyState		= 2 + lmpRxVerifyMode	;LMP Command : Verify
+lmpRxIASAttribVerifyState	= 3 + lmpRxVerifyMode	;IAS Data :
+lmpRxIASErrorState		= 4 + lmpRxVerifyMode	;IAS Data :
+
+lmpTxStringState		= 1			;Send a string
+lmpTxIASErrorState		= 2			;Reply stating that the IAS service is an un-supported option or error
+lmpTxCommDataState		= 3			;Sending Comm Data
+
+;********************************************************************************
+			ENDM
+
+
+LmpCodeSeg		MACRO
+;********************************************************************************
+;  LMP LAYER
+;********************************************************************************
+
+;********** a2lmpReset **********
+
+a2lmpReset
+	bank	lmpBank
+	clr	lmpRxState
+	clr	lmpTxState
+	clr	lmpAppLSAP
+	retp
+
+;********** lap2lmpConnectIndication **********
+
+lap2lmpConnectIndication	=	a2lmpReset
+
+;********** lap2lmpDisconnectIndication **********
+
+lap2lmpDisconnectIndication	=	a2lmpReset
+
+;********** lap2lmpRxData **********
+
+lap2lmpRxData
+	bank	lmpBank
+	mov	lmpData, w				;Store data
+	snb	lmpRxState.7				;Interested in data ? (lmpRxDataMode)
+	retp
+	mov	w, lmpRxState				;Jump based on state
+	jmp	PC+w
+	jmp	lmpRxDLSAPByte				;  0 = lmpIdleState
+	jmp	lmpRxSLSAPByte				;  1 = lmpRxSLSAPState
+	jmp	lmpRxCmdOpcodeByte			;  2 = lmpRxLMPCmdOpcodeState
+	jmp	lmpRxIASCmd				;  3 = lmpRxIASCmdState
+	jmp	lmpRxIASClassLength			;  4 = lmpRxIASClassLengthState
+	jmp	lmpRxIASStringTest			;  5 = lmpRxIASClassTestState
+	jmp	lmpRxIASDeviceAttrib			;  6 = lmpRxIASDeviceAttribState
+	jmp	lmpRxIASCommAttrib			;  7 = lmpRxIASCommAttribState
+	jmp	lmpRxIASStringTest			;  8 = lmpRxIASAttribTestState
+	jmp	lmpRxCommData				;  9 = lmpRxCommDataState
+
+;********** lap2lmpRxValid **********
+
+lap2lmpRxValid
+	debugl	IFrameDataRx, '^'
+	bank	lmpBank
+	snb	lmpAppRxFlag				;CommData ?
+	jmp	lmpRxValidCommData			;Yes => process
+	sb	lmpRxState.7				;Interested in valid ? (lmpRxVerifyMode)
+	retp
+	mov	w, lmpRxState				;Jump based on state
+	and	w, #%01111111				;Remove Mode bit
+	clr	lmpRxState				;Clear RxState back to idle
+	jmp	PC+w
+	retp						;  0 = lmpIdleState (invalid)
+	jmp	lmpRxBadLSAP				;  1 = lmpRxBadLSAPState
+	jmp	lmpRxValidLMPCommand			;  2 = lmpRxLMPCmdVerifyState
+	jmp	lmpRxValidIASAttribVerify		;  3 = lmpRxIASAttribVerifyState
+	jmp	lmpRxValidIASError			;  4 = lmpRxIASErrorState
+
+;********** lap2lmpRxInvalid **********
+
+lap2lmpRxError
+	debugl	IFrameDataRx, '!'
+	setb	ledERR					;Turn ERR led on
+	bank	lmpBank
+	clr	lmpRxState				;Return to idle state
+	sb	lmpAppRxFlag				;CommDataMode ?
+	retp						;No  => return
+	clrb	lmpAppRxFlag				;Clear flag
+	pjmp	lmp2appRxCommError			;Yes => Inform app layer of valid (app layer will issue ret instruction)
+
+;********** lap2lmpTxData **********
+
+lap2lmpTxFrame
+	bank	lmpBank
+	clr	lmpPosition
+	test	lmpTxState				;Idle state ?
+	jnz	:Send
+:Idle	test	lmpAppLSAP				;LMP Connection open to comm layer ?
+	snz						;Zero indicates no connection
+	retp						;No  => indicate no data and return
+	pcall	lmp2appTxCommStart			;Yes => find out if data to send
+	snz						;Data to send
+	retp						;No  => indicate no data and return
+	bank	lmpBank
+	mov	lmpTxState, #lmpTxCommDataState		;Prepare to transmit frame
+	mov	lmpTxDLSAP, lmpAppLSAP			;Ensure correct DLSAP
+	mov	lmpTxSLSAP, #lmpLSAPComm		;Ensure correct SLSAP
+	mov	lmpPosition, #lapMaxFrameSize		;Protect frame size
+:Send	mov	w, lmpTxDLSAP				;Desired DLSAP
+	bank	plBank
+	mov	plIDataDLSAP, w				;Store for transmission
+	bank	lmpBank
+	mov	w, lmpTxSLSAP				;Desired SLSAP
+	bank	plBank
+	mov	plIDataSLSAP, w				;Store for transmission
+	clz						;Indicate more data to follow
+	retp
+
+;********** lap2lmpTxData **********
+
+lap2lmpTxData						;Lap layer can accept a data byte (for an I frame) if there is one available. if there is data available then lmp returns data byte and sets z to false
+	bank	lmpBank
+	mov	w, lmpTxState				;Jump based on state
+	jmp	PC+w					;Jump based on state
+	retp						;  0 = Idle state (cannot receive TxData in idle state)
+	jmp	lmpTxString				;  1 = lmpTxStringState
+	jmp	lmpTxIASError				;  2 = lmpTxIASErrorState
+	jmp	lmpTxCommData				;  3 = lmpTxCommDataState
+
+;********** lap2lmpTxValid **********
+
+lap2lmpTxValid						;Lap layer is indicating that all data passed since last TxStart message was acknowledged
+	debugl	IFrameDataTx, '^'
+	bank	lmpBank
+	clr	lmpTxState				;Return to idle state
+	sb	lmpAppTxFlag				;Transmitting app data ?
+	retp						;No  => return
+	clrb	lmpAppTxFlag
+	pjmp	lmp2appTxCommValid			;Yes => Inform app layer of valid (app layer will issue ret instruction)
+
+;********** lap2lmpTxError **********
+
+lap2lmpTxError						;Lap layer is indicating that all data passed since last TxStart message will need to be sent again
+	debugl	IFrameDataTx, '!'
+	setb	ledERR					;Turn ERR led on
+	bank	lmpBank
+	sb	lmpAppTxFlag				;Transmitting app data ?
+	retp						;No  => return (stay in this state for retransmission)
+	clrb	lmpAppTxFlag
+	pjmp	lmp2appTxCommError			;Yes => Inform app layer of error (app layer will issue ret instruction)
+
+;********************************************************************************
+;  LMP LAYER - Rx
+;********************************************************************************
+
+lmpRx2TxSetup
+	mov	lmpTxDLSAP, lmpRxSLSAP			;DLSAP = received SLSAP
+	mov	lmpTxSLSAP, lmpRxDLSAP			;SLSAP = received DLSAP
+	retp
+
+;********************************************************************************
+
+;********** lap2lmpRxData - RxDLSAPState **********
+
+lmpRxDLSAPByte
+	mov	lmpRxDLSAP, lmpData			;Store data
+	inc	lmpRxState				;Next state = lmpRxSLSAPState
+	retp
+
+;********** lap2lmpRxData - RxSLSAPState **********
+
+lmpRxSLSAPByte
+	mov	lmpRxSLSAP, lmpData			;Store data
+	clrb	lmpRxSLSAP.7				;Ensure MSB is clear
+	snb	lmpRxDLSAP.7				;Is this a LMP-Command frame (DLSAP bit 7 set) ?
+	jmp	:Cmd					;Yes => process command
+	csne	lmpRxDLSAP, #lmpLSAPComm		;DLSAP addressing Comm ?
+	jmp	:Comm					;Yes => accept
+	mov	w, lmpRxBadLSAPState			;If not server then Bad LSAP
+	test	lmpRxDLSAP				;0 = IAS Server
+	snz						;Addressing IAS Server ?
+	mov	w, #lmpRxIASCmdState			;Yes => IAS Server state
+	mov	lmpRxState, w				;Apply state
+	retp
+:Cmd	mov	lmpRxState, #lmpRxLMPCmdOpcodeState	;No => change to RxCmdOpcodeState
+	clrb	lmpRxDLSAP.7				;Ensure MSB is clear
+	retp
+:Comm	mov	w, #lmpRxCommDataState			;Comm data
+	test	lmpAppLSAP				;Connected ?
+	snz
+	mov	w, lmpRxBadLSAPState			;No => error
+	mov	lmpRxState, w				;Apply state
+	retp
+
+;********** lap2lmpRxData - RxCmdOpcodeState **********
+
+lmpRxCmdOpcodeByte
+	mov	lmpRxLMPCmdOpcode, lmpData		;Store data in opcode variable
+	mov	lmpRxState, #lmpRxLMPCmdVerifyState	;Wait for Valid message
+	retp
+
+;********** lap2lmpRxData - RxIASCmdState **********
+
+lmpRxIASCmd
+	mov	w, lmpData				;IAS Service request
+	and	w, #%10111111				;Mask out ack bit
+	mov	lmpRxIASErrOpcode, w			;Store Service Request in case of error
+	xor	w, #$84					;Is the service request GetValueByClass ?
+	jnz	:Err					;No => must reply with service unsupported
+	inc	lmpRxState				;Yes => wait for class name length
+	retp
+:Err	mov	lmpRxState, #lmpRxIASErrorState		;Will reply with Unsupported
+	mov	lmpRxIASErrRetCode, #$FF		;Reply = $FF = unsupported service
+	retp
+
+;********** lap2lmpRxData - RxIASClassLengthState **********
+
+lmpRxIASClassLength					;Data = lnegth of class name
+	inc	lmpRxState				;Next state = lmpRxIASClassTestState
+	mov	lmpRxIASErrRetCode, #$01		;If error then Reply = $01 = no such class
+	csne	lmpData, #$06				;Is the class name length 6 indicating that we should test for "Device" ?
+	jmp	:Dev					;Yes => test for "Device"
+	csne	lmpData, #$0B				;Is the class name length 11 indicating that we should test for "IrDA:IrCOMM" ?
+	jmp	:Comm					;Yes => test for "IrDA:IrCOMM"
+	mov	lmpRxState, #lmpRxIASErrorState		;No => Will reply with IAS error
+	retp
+:Dev	mov	lmpRxPostTest, #lmpRxIASDeviceAttribState	;If class is correct then will cahnge to DeviceAttrib state
+	mov	lmpPosition, #_lmpIASDeviceClass		;Pointer to string
+	retp
+:Comm	mov	lmpRxPostTest, #lmpRxIASCommAttribState		;If class is correct then will cahnge to CommAttrib state
+	mov	lmpPosition, #_lmpIASCommClass			;Pointer to string
+	retp
+
+;********** lap2lmpRxData - RxIASDeviceAttribState **********
+
+lmpRxIASDeviceAttrib
+	mov	lmpRxState, #lmpRxIASAttribTestState		;Next will verify attrib string
+	mov	lmpRxPostTest, #lmpRxIASAttribVerifyState	;If attrib is correct then will cahnge to AttribVerify state
+	mov	lmpRxIASErrRetCode, #$02			;If error then Reply = $02 = no such attribute
+	csne	lmpData, #$0A					;Is the class name length 10 indicating that we should test for "DeviceName" ?
+	jmp	:Name						;Yes => test for "Device"
+	csne	lmpData, #12					;Is the class name length 12 indicating that we should test for "IrLMPSupport" ?
+	jmp	:Supp						;Yes => test for "IrLMPSupport"
+	mov	lmpRxState, #lmpRxIASErrorState			;No => Will reply with IAS error
+	retp
+:Name	mov	lmpRxSendStringL, #_lmpIASDeviceName		;Pointer to string to send in reply if attrib verifies
+	mov	lmpPosition, #_lmpIASDeviceAttribName		;Pointer to string to test
+	retp
+:Supp	mov	lmpRxSendStringL, #_lmpIASDeviceSupport		;Pointer to string to send in reply if attrib verifies
+	mov	lmpPosition, #_lmpIASDeviceAttribSupport	;Pointer to string to test
+	retp
+	
+;********** lap2lmpRxData - RxIASCommAttribState **********
+
+lmpRxIASCommAttrib
+	mov	lmpRxState, #lmpRxIASAttribTestState		;Next will verify attrib string
+	mov	lmpRxPostTest, #lmpRxIASAttribVerifyState	;If attrib is correct then will cahnge to AttribVerify state
+	mov	lmpRxIASErrRetCode, #$02			;If error then Reply = $02 = no such attribute
+	csne	lmpData, #$0A					;Is the class name length 10 indicating that we should test for "Parameters" ?
+	jmp	:Param						;Yes => test for "Parameters"
+	csne	lmpData, #$12					;Is the class name length 18 indicating that we should test for "IrDA:IrLMP:LsapSel" ?
+	jmp	:Lsap						;Yes => test for "IrDA:IrLMP:LsapSel"
+	mov	lmpRxState, #lmpRxIASErrorState			;No => Will reply with IAS error
+	retp
+:Param	mov	lmpRxSendStringL, #_lmpIASCommParam		;Pointer to string to send in reply if attrib verifies
+	mov	lmpPosition, #_lmpIASCommAttribParam		;Pointer to string to test
+	retp
+:Lsap	mov	lmpRxSendStringL, #_lmpIASCommLsapSel		;Pointer to string to send in reply if attrib verifies
+	mov	lmpPosition, #_lmpIASCommAttribLsapSel		;Pointer to string to test
+	retp
+
+;********** lap2lmpRxData - RxIASStringTestState **********
+
+lmpRxIASStringTest
+	mov	m, #_lmpRxStringSegment / 256		;String Segment (high)
+	mov	w, lmpPosition				;Pointer to string (low)
+	inc	lmpPosition				;Increment offset for next byte
+	iread						;Get data byte (in w)
+	xor	w, lmpData				;Is the received data byte correct ?
+	jnz	:Err					;No  => error
+	mov	w, m					;Yes => continue. Move high part of data to w
+	test	w					;Is this the last byte ? (m is not 0)
+	snz
+	retp						;No  => stay in this state
+	mov	lmpRxState, lmpRxPostTest		;Yes => Change to next state
+	retp
+:Err	mov	lmpRxState, #lmpRxIASErrorState		;Will reply with Error code
+	retp
+
+;********** lap2lmpRxData - RxCommDataState **********
+
+lmpRxCommData
+	setb	lmpAppRxFlag				;remember passing data
+	mov	w, lmpData				;Data to pass
+	pjmp	lmp2appRxCommData			;Pass data to app layer
+
+;********************************************************************************
+
+;********** lap2lmpRxValid - RxBadLSAPState **********
+
+lmpRxBadLSAP						;Should disconnect connection !!!
+	pjmp	lmp2lapDisconnectRequest
+
+;********** lap2lmpRxValid - RxLMPCmdVerifyState **********
+
+lmpRxValidLMPCommand
+	csne	lmpRxLMPCmdOpcode, #lmpConnectCmdOpcode	;Is this a request to open a connection ?
+	jmp	:Conn					;Yes => accept
+	csne	lmpRxLMPCmdOpcode, #lmpDisconnectOpcode	;Is this a request to clsoe a connection ?
+	jmp	:Disc					;Yes => close
+	retp						;No  => Unknown or unsupported command => ignore
+:Conn	mov	lmpTxStringH, #_lmpLMPConnRsp / 256	;Pointer to string
+	mov	lmpTxStringL, #_lmpLMPConnRsp		;Pointer to string
+	mov	lmpTxState, #lmpTxStringState		;Prepare to transmit parameters
+	setb	lmpRxSLSAP.7				;Indicate command (this will be the DLSAP byte when transmitted)
+	cse	lmpRxDLSAP, #lmpLSAPComm		;DLSAP addressing Comm ?
+	jmp	lmpRx2TxSetup				;No  => nothing more to do other than to prepare to send reply
+	mov	lmpAppLSAP, lmpRxSLSAP			;Yes => Store Source LSAP in AppLSAP (ie remember the remote Comm App LSAP)
+	clrb	lmpAppLSAP.7				;Set to information frame
+	jmp	lmpRx2TxSetup				;prepare to send reply
+:Disc	csne	lmpRxDLSAP, #lmpLSAPComm		;DLSAP addressing Comm ?
+	clr	lmpAppLSAP				;Yes => clear connection
+	retp
+
+;********** lap2lmpRxValid - RxIASAttribVerifyState **********
+
+lmpRxValidIASAttribVerify
+	mov	lmpTxStringH, #_lmpTxStringSegment / 256	;Pointer to string
+	mov	lmpTxStringL, lmpRxSendStringL			;Pointer to string
+	mov	lmpTxState, #lmpTxStringState			;Prepare to transmit parameters
+	jmp	lmpRx2TxSetup					;Prepare to transmit frame
+
+;********** lap2lmpRxValid - RxIASErrorState **********
+
+lmpRxValidIASError
+	mov	lmpTxState, #lmpTxIASErrorState			;Prepare to transmit error return code
+	mov	lmpTxIASErrOpcode, lmpRxIASErrOpcode
+	mov	lmpTxIASErrRetCode, lmpRxIASErrRetCode
+	jmp	lmpRx2TxSetup					;Prepare to transmit frame
+
+;********** lap2lmpRxValid - RxCommDataState **********
+
+lmpRxValidCommData
+	clr	lmpRxState					;Clear RxState back to idle
+	clrb	lmpAppRxFlag
+	pjmp	lmp2appRxCommValid
+
+;********************************************************************************
+;  LMP LAYER - Tx
+;********************************************************************************
+
+;********** lap2lmpTxData - TxStringState **********
+
+lmpTxString
+	mov	m, lmpTxStringH				;Pointer to string (high)
+	mov	w, lmpTxStringL				;Pointer to string (low)
+	add	w, lmpPosition				;Add offset
+	inc	lmpPosition				;Increment offset for next byte
+	iread
+	mov	Temp, w					;Store data
+	mov	w, m					;Move high part of data to w
+	test	w					;Is this the last byte ?
+	jnz	:Last					;Yes
+	mov	w, Temp					;Data to pass
+	clz						;Indicate more data to follow Data
+	retp						;Return data to framing layer
+:Last	mov	w, Temp					;Data to pass
+	stz						;Indicate last byte
+	retp						;Return data to framing layer
+
+;********** lap2lmpTxData - TxIASErrorState **********
+
+lmpTxIASError
+	test	lmpPosition
+	jnz	:ErrCod
+:Opcode	mov	w, lmpTxIASErrOpcode			;Opcode that was received
+	inc	lmpPosition				;Next will send RetCode
+	clz						;Indicate more data to follow
+	retp
+:ErrCod	mov	w, lmpTxIASErrRetCode			;RetCode
+	stz						;Indicate last byte
+	retp
+
+;********** lap2lmpTxData - TxCommDataState **********
+
+lmpTxCommData
+	setb	lmpAppTxFlag				;remember receiving data
+	pcall	lmp2appTxCommData			;Get next data byte
+	bank	lmpBank
+	snz						;Skip if not last byte
+	retp						;Z = 0 indicating last byte
+	dec	lmpPosition				;Byte counter
+	retp						;Returns Z = true if counter = 0 ie when counter reaches 0 last flag will be set
+
+;********************************************************************************
+			ENDM
+
+LmpRxStringSeg		MACRO
+;********************************************************************************
+;  LMP LAYER - Strings		;WARNING - Strings must not go over a 256 boundry !!!
+;********************************************************************************
+
+_lmpRxStringSegment		;Rx strings must all be in the same segement !!!
+
+_lmpIASDeviceClass		dw	'Device'+$F00				;Classname = "Device" ($F00 indicates end)
+_lmpIASDeviceAttribName		dw	'DeviceName'+$F00			;Device Attribute: "DeviceName" ($F00 indicates end)
+_lmpIASDeviceAttribSupport	dw	'IrLMPSupport'+$F00			;Device Attribute: "IrLMPSupporte" ($F00 indicates end)
+_lmpIASCommClass		dw	'IrDA:IrCOMM'+$F00			;Classname = "IrDA:IrCOMM" ($F00 indicates end)
+_lmpIASCommAttribParam		dw	'Parameters'+$F00			;IrCOMM Attribute: "Parameters" ($F00 indicates end)
+_lmpIASCommAttribLsapSel	dw	'IrDA:IrLMP:LsapSel'+$F00		;IrCOMM Attribute: "LsapSel" ($F00 indicates end)
+
+;********************************************************************************
+			ENDM
+
+LmpTxStringSeg		MACRO
+;********************************************************************************
+;  LMP LAYER - String		;WARNING - Strings must not go over a 256 boundry !!!
+;********************************************************************************
+
+_lmpTxStringSegment		;Tx strings must all be in the same segement !!!
+
+_lmpLMPConnRsp			dw	lmpConnectRspOpcode, $00+$F00
+
+_lmpIASDeviceName		dw	$84, $00				;$84 = Reply to GetValueByClass, $00 = success
+_lmpIASDeviceName1		dw	$00, $01				;List length = 1 item
+_lmpIASDeviceName2		dw	$00, $00				;Object identifier = 0
+_lmpIASDeviceName3		dw	$03, $00				;Data is of type "User string", ASCII
+_lmpIASDeviceName4		dw	28					;length of text = 28 octets
+_lmpIASDeviceNameText		dw	'SX IrDA IrComm Demonstration'+$F00	;String to be displayed
+
+_lmpIASDeviceSupport		dw	$84, $00				;$84 = Reply to GetValueByClass, $00 = success
+_lmpIASDeviceSupport1		dw	$00, $01				;List length = 1 item
+_lmpIASDeviceSupport2		dw	$00, $00				;Object identifier = 0
+_lmpIASDeviceSupport3		dw	$02					;Data is of type "Octet Sequence"
+_lmpIASDeviceSupport4		dw	$00, $03				;Data is 3 bytes in length
+_lmpIASDeviceSupport5		dw	$01					;Data : IrLMP Version = 1 (refer LMP p 84)
+_lmpIASDeviceSupport6		dw	$00					;Data : IAS Support = no additional features (refer LMP p 84)
+_lmpIASDeviceSupport7		dw	$00+$F00				;Data : MUX Support = no additional features (refer LMP p 85) ($F00 indicates end)
+
+_lmpIASCommParam		dw	$84, $00				;$84 = Reply to GetValueByClass, $00 = success
+_lmpIASCommParam1		dw	$00, $01				;List length = 1 item
+_lmpIASCommParam2		dw	$00, $00				;Object identifier = 0
+_lmpIASCommParam3		dw	$02					;Data is of type "Octet Sequence"
+_lmpIASCommParam4		dw	$00, $06				;Data is 6 bytes in length
+_lmpIASCommParam5		dw	$00, 1, %00000001			;Data : Service types = 3 wire raw
+_lmpIASCommParam6		dw	$01, 1, %00000011+$F00			;Data : Port type = serial or parallel ($F00 indicates end)
+
+_lmpIASCommLsapSel		dw	$84, $00				;$84 = Reply to GetValueByClass, $00 = success
+_lmpIASCommLsapSel1		dw	$00, $01				;List length = 1 item
+_lmpIASCommLsapSel2		dw	$00, $00				;Object identifier = 0
+_lmpIASCommLsapSel3		dw	$01					;Data is of type "Integer"
+_lmpIASCommLsapSel4		dw	$00, $00, $00, lmpLSAPComm+$F00		;LsapSel = 5 ($F00 indicates end)
+
+;********************************************************************************
+			ENDM
+

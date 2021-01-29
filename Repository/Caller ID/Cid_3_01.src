@@ -1,0 +1,1873 @@
+;*****************************************************************************************
+; Copyright © [11/21/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+; 
+; Filename:	cid_3_0.src
+;
+; Authors:	Chris Fogelklou
+;		Applications Engineer	
+;		Scenix Semiconductor, Inc.
+;		
+;
+; Revision:	3.00
+;
+; Part:		SX28AC datecode 9929AA/ SX52BD datecode AB9919AA
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.07 and SASM software V.1.44.3
+;
+; Date Written: February 8, 1999
+;
+; Last Revised: November 30, 1999
+;
+; Program Description:
+;	This program is written to run on the Scenix Modem Demo Board, Rev 1.2.
+;
+;	This program demonstrates the reception of Caller-ID signals using an
+;	interrupt-driven FSK-receive routine in addition to a 62-byte  
+;	buffer for storage of the Caller-ID string.  Once a CID signal is received, it
+;	is output to a terminal screen using a 9600bps serial connection.  See below.
+;
+HARDWARE_FLOW_CONTROL	; Uncomment to enable hardware flow control
+;
+;		The PC interface is set up to operate at 9600bps,N,8,1 with hardware flow control.
+;		The Caller-ID modulation is assumed to be 
+;		1300Hz and 2100Hz, 7 data bits, 1 stop bit.
+;
+;
+;		Pins Used:
+;	
+;		rx_pin		equ	ra.1	; RS-232 reception pin
+;		tx_pin		equ	ra.2	; RS-232 transmission pin
+;		led_pin		equ	rb.0	; LED pin... Flashes an LED while program is running.
+;		hook		equ	rb.4	; drive hook low to go off-hook
+;		rts		equ	rb.6	; indicates to the SX that the PC wants to transmit 
+;						; data (hardware flow control)
+;		cts		equ	rb.7	; indicates to the PC that the SX is ready to 
+;						; receive data ( " " ")
+;		fsk input	equ	rb.1	; FSK input (zero-cross) on RB.1
+;
+; Revision History:
+;		2.0 Began with sx_modem_3_61.src and removed all unnecessary
+;	 	    components, such as FSK transmit, DTMF transmit, AT command set,
+;		    ring detection, etc...  Added the FIFO buffer, and caller-ID 
+;		    parsing routines.
+;		2.01 Updated the documentation to properly reflect what was
+;		     really going on... (2/21/99)
+;		3.0 Re-wrote code using newer modem modules and documentation for more
+;		    code clarity and flexibility.  Tested with Ring-It! phone line simulator.
+;		    Also tested with SASM assembler and SX-52.
+;			
+;
+;*****************************************************************************************
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+SX28
+;SX48_52
+;SX48_52_ES
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52				;SX48/52/BD device directives for SX-Key
+		device	oschs2,stackx_optionx
+    ENDIF
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs1,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs1,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs1,stackx,optionx   
+    ENDIF
+  ENDIF
+ENDIF
+		id	'CID30'		;
+		reset	reset_entry		; set reset vector
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+_bank	macro	1
+	bank	\1
+
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+	    ELSE
+		clrb	fsr.7
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+
+	;*****************************************************************************************
+	; Macros for SX28/52 Compatibility
+	;*****************************************************************************************
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+	IFDEF SX48_52
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+	ELSE
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+	ENDIF
+	endm
+
+	;*****************************************************************************************
+	; INCP/DECP macros for incrementing pointers to RAM
+	;*****************************************************************************************
+INCP	macro	1
+		inc	\1
+	IFNDEF	SX48_52
+		setb	\1.4		; If SX18 or SX28, keep bit 4 of the pointer = 1
+	ENDIF				; to jump from $1f to $30, etc.
+	endm
+		
+DECP	macro	1
+	IFDEF	SX48_52
+		dec	\1
+	ELSE
+		clrb	\1.4		; If SX18 or SX28, forces rollover to next bank
+		dec	\1		; if it rolls over.  (Skips banks with bit 4 = 0)
+		setb	\1.4		; Eg:  $30 --> $20 --> $1f --> $1f
+	ENDIF				; AND: $31 --> $21 --> $20 --> $30
+	endm
+
+
+	;*****************************************************************************************
+	; Error generating macros
+	;*****************************************************************************************
+
+tableStart	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+tableEnd	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+		org     global_org
+
+	flags0		equ	global_org + 0
+;VP: RS232 Receive
+		rs232_rx_flag	equ	flags0.0; flag that indicates an incoming digit
+;VP: 5ms Timer
+		timer_flag	equ	flags0.1; flag is set when the 5ms timer rolls over.
+;VP: FSK Demodulation
+		fskRxEn		equ	flags0.3
+		fskRxFlag	equ	flags0.4
+	flags1		equ	global_org + 1
+	localTemp0	equ	global_org + 2	; temporary storage register
+	localTemp1	equ	global_org + 3	; temporary storage register		
+	localTemp2	equ	global_org + 4	; temporary storage register
+	isrTemp0	equ	global_org + 5	; Interrupt Service Routine's temp register.  
+						; Don't use this register in the mainline.
+
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+bank0		=	$
+	
+
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+bank1		=	$
+
+
+;VP: RS232 Transmit
+
+RS232_tx_bank	=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+string		ds	1			;the address of the string to be sent
+byte		ds	1			;semi-temporary serial register
+
+;VP: RS232 Receive
+
+RS232_rx_bank	=	$
+
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+
+;VP: ISR Multitasker
+
+isr_multiplex	ds	1		; multitasks the ISR
+
+;VP: 5ms Timer 
+
+timers			=	$
+
+timer_div	ds	1		; This timer rolls over every 5ms.  Modify constant for sampling rate. in 5ms.
+timer_5ms	ds	1		; The 5ms timer.  Increments every 5ms if timer_div is set up correctly.
+
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+;VP: FSK Demodulation 
+
+fskRxBank	=	$
+
+fskTransCount	ds	1
+fskRxPortPast	ds	1
+fskRxFlags	ds	1
+fskTransFlag1	equ	fskRxFlags.0
+fskRxBit	equ	fskRxFlags.1
+fskThisTrans	ds	1
+fskLastTrans	ds	1
+fskRxCount	ds	1
+fskRxDivide	ds	1
+fskRxTemp	ds	1
+fskRxByte	ds	1
+fskByte		ds	1
+
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+
+bank4		=	$
+
+;VP: 62-byte buffer
+
+pushIndex	ds	1
+popIndex	ds	1
+buffer		ds	14
+
+
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+
+bank5		=	$
+
+;VP: 62-byte buffer
+
+buffer2		ds	16
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+
+bank6		=	$
+
+;VP: 62-byte buffer
+
+buffer3
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+
+bank7		=	$
+
+;VP: 62-byte buffer
+
+buffer4
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+
+bank8		=	$
+
+
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+
+bank9		=	$
+
+
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+
+bankA		=	$
+
+
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+
+bankB		=	$
+
+
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+
+bankC		=	$
+
+
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+
+bankD		=	$
+
+
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+
+bankE		=	$
+
+
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+
+bankF		=	$
+
+
+ENDIF
+		
+	;*********************************************************************************
+	; Pin Definitions:  These are the pins on the Scenix Modem board.  Not all are
+	; 			necessary.  Check the documentation at the top of this 
+	;			program.
+	;*********************************************************************************
+PDM_pin		equ	ra.0	; D/A output pin
+rx_pin		equ	ra.1	; RS-232 reception pin
+tx_pin		equ	ra.2	; RS-232 transmission pin
+nothing		equ	ra.3	; N/C
+RA_latch	equ	%11111111		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11111010		;SX18/20/28/48/52 port A DDIR value
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%11111111		;SX18/20/28/48/52 port A PLP value
+
+led_pin		equ	rb.0	; LED pin
+rxa_pin		equ	rb.1	; FSK receive pin
+cntrl_1		equ	rb.2	; drive cntrl_1 low to disable the output of the LPF
+ring		equ	rb.3	; ring detection pin
+hook		equ	rb.4	; drive hook low to go off-hook
+cntrl_3		equ	rb.5	; drive cntrl_3 low to disable the output of the HPF
+rts		equ	rb.6	; indicates to the SX that the PC wants to transmit data
+cts		equ	rb.7	; indicates to the PC that the SX is ready to receive data
+
+
+	
+fskRxPort	equ	rb		; fskRxPort defines the port that the FSK receive pin is on
+fskRxMask	equ	%00000010	; fskRxMask masks off the pin to receive FSK on (pin 1 for $02 mask)
+
+RB_latch	equ	%11011011	;SX18/20/28/48/52 port B latch init
+
+RB_DDIR		equ	%01101010	;SX18/20/28/48/52 port B DDIR value: HPF
+
+RB_ST		equ	%11111111	;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000	;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111	;SX18/20/28/48/52 port B PLP value
+
+dtmf_in_pin	equ	rc.0	; DTMF input pin
+dtmf_fdbk_pin	equ	rc.1	; Negative feedback output for DTMF input
+AtoD_in_pin	equ	rc.2	; A/D input pin
+AtoD_fdbk_pin	equ	rc.3	; Negative feedback for A/D input
+imp_450_pin	equ	rc.4	; Set to an output to set hybrid for 450ohm line impedance.  Tristate otherwise.
+imp_600_pin	equ	rc.5	; Set to an output to set hybrid for 600ohm line impedance.  Tristate otherwise.
+imp_750_pin	equ	rc.6	; Set to an output to set hybrid for 750ohm line impedance.  Tristate otherwise.
+imp_900_pin	equ	rc.7	; Set to an output to set hybrid for 900ohm line impedance.  Tristate otherwise.
+RC_latch	equ	%00001111		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%11010101		;SX18/20/28/48/52 port C DDIR value
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+
+IFDEF SX48_52	;SX48BD/52BD Port initialization values
+RD_latch	equ	%00000000		;SX48/52 port D latch init
+RD_DDIR		equ	%11111111		;SX48/52 port D DDIR value
+RD_ST		equ	%11111111		;SX48/52 port D ST value
+RD_LVL		equ	%00000000		;SX48/52 port D LVL value
+RD_PLP		equ	%11111111		;SX48/52 port D PLP value
+
+RE_latch	equ	%00000000		;SX48/52 port E latch init
+RE_DDIR		equ	%11111111		;SX48/52 port E DDIR value
+RE_ST		equ	%11111111		;SX48/52 port E ST value
+RE_LVL		equ	%00000000		;SX48/52 port E LVL value
+RE_PLP		equ	%11111111		;SX48/52 port E PLP value
+ENDIF
+
+;*****************************************************************************************
+; Program constants
+;*****************************************************************************************
+
+;VP: 5ms Timer
+	TIMER_DIV_CONST	equ	192		; This constant = timerFS/200Hz = 192
+
+;VP: FSK Reception
+
+	;----------------------------------------------------
+	; *** Sample_rate/32 = 38400/32 = 1200bps
+	;----------------------------------------------------
+	fskRx_baud_bit	=       5			;1200bps receiver defines
+	fskRx_start_delay =     32+16+1			; "    "    "
+
+IFDEF	SX_Key
+
+	FSK_FS 		= 76687				; the sampling rate for the zero-cross timer
+	FREQ_IN_1	= 1300				; the low-frequency input
+	FREQ_IN_0 	= 2100				; the high-frequency input
+	FREQ_TH		= (FREQ_IN_0 + FREQ_IN_1)/2	; the crossover point between the two frequencies
+	FSK_TH		= FSK_FS/FREQ_TH		; the actual count that represents the crossover
+							; point between the counts of the two frequencies'
+							; zero-cross timings.
+ELSE						
+
+	FSK_TH		= $2D				; SASM can't perform this calculation automatically.
+							; This is the result of the calculation.	
+
+ENDIF
+
+	FSK_HYS		= 0				; the number to add/subtract to or from the FSK threshold
+							; to create some hysterises to compensate for jitter on
+							; the input.
+	FSK_DATA_BITS	= 7				; The number of data bits to receive via FSK between the
+							; start and stop bits.
+;VP:  RS232 Transmit & Receive
+; Equates for baud rates:  sampling time of Sample_rate/n
+;
+;----------------------------------------------------
+; *** Sample_rate/4
+;----------------------------------------------------
+tx_baud_bit	=       2			; ie: if sample rate for UART is 38400, for 9600bps UART
+rx_baud_bit	=	2
+rx_start_delay	=       4+2+1			; "    "    "
+;----------------------------------------------------
+; *** Sample_rate/8
+;----------------------------------------------------
+;baud_bit	=       3			;
+;start_delay	=       8+4+1			; "    "    "
+;----------------------------------------------------
+; *** Sample_rate/16
+;----------------------------------------------------
+;tx_baud_bit	=       4			;RS232 transmitter defines (2400bps)
+;rx_baud_bit	=	4			;RS232 receiver defines
+;rx_start_delay	=       16+8+1			; "    "     "
+;----------------------------------------------------
+; *** Sample_rate/32 
+;----------------------------------------------------
+;tx_baud_bit	=       5			;
+
+;fskRx_baud_bit	=       5			;1200bps receiver defines
+;fskRx_start_delay =       32+16+1			; "    "    "
+;----------------------------------------------------
+; *** Sample_rate/64 
+;----------------------------------------------------
+;baud_bit 	=       6			;
+;start_delay	=       64+32+1			; "    "    "
+;----------------------------------------------------
+; *** Sample_rate/128
+;----------------------------------------------------
+;baud_bit	=       7			;
+;start_delay 	=	128+64+1		; "    "    "
+
+
+;-------------------------------------------------------------------------------------
+int_period	equ	163		; Gives an interrupt period at 50MHz of (163 * (1/50000000)s) = 3.26us
+					; Which gives an interrupt frequency of (1/3.26u)Hz = 306.75kHz
+;-------------------------------------------------------------------------------------
+IFDEF SX48_52
+	;*********************************************************************************
+	; SX48BD/52BD Mode addresses
+	; *On SX48BD/52BD, most registers addressed via mode are read and write, with the
+	; exception of CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Timer (read) addresses
+TCPL_R		equ	$02		;Read Timer Capture register low byte
+TCPH_R		equ	$02		;Read Timer Capture register high byte
+TR2CML_R	equ	$02		;Read Timer R2 low byte
+TR2CMH_R	equ	$03		;Read Timer R2 high byte
+TR1CML_R	equ	$04		;Read Timer R1 low byte
+TR1CMH_R	equ	$05 		;Read Timer R1 high byte
+TCNTB_R		equ	$06		;Read Timer control register B
+TCNTA_R		equ	$07		;Read Timer control register A
+
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_R		equ	$0A		;Read MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_R		equ	$0B		;Read MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_R		equ	$0C		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_R		equ	$0D		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_R		equ	$0E		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_R		equ	$0F		;Read Port Direction
+
+; Timer (write) addresses
+TR2CML_W	equ	$12		;Write Timer R2 low byte
+TR2CMH_W	equ	$13		;Write Timer R2 high byte
+TR1CML_W	equ	$14		;Write Timer R1 low byte
+TR1CMH_W	equ	$15 		;Write Timer R1 high byte
+TCNTB_W		equ	$16		;Write Timer control register B
+TCNTA_W		equ	$17		;Write Timer control register A
+
+; Port setup (write) addresses
+WKED_W		equ	$1A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$1B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$1C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$1D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$1E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$1F		;Write Port Direction
+
+ELSE
+
+	;*********************************************************************************
+	; SX18AC/20AC/28AC Mode addresses
+	; *On SX18/20/28, all registers addressed via mode are write only, with the exception of
+	; CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_W		equ	$0A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$0B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$0C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$0D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$0E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$0F		;Write Port Direction
+ENDIF
+
+
+;*****************************************************************************************
+; Program memory ORG defines
+;*****************************************************************************************
+
+INTERRUPT_ORG		equ	$0	; Interrupt must always start at location zero
+INTERRUPT_ORG2		equ	$100	; Some more of the ISR is stored in location $100
+RESET_ENTRY_ORG		equ	$1FB	; The program will jump here on reset.
+SUBROUTINES_ORG		equ	$200	; The subroutines are in this location
+STRINGS_ORG		equ	$300	; The strings are in location $300
+PAGE3_ORG		equ	$400	; Page 3 is empty
+MAIN_PROGRAM_ORG	equ	$600	; The main program is in the last page of program memory.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;****************************** Beginning of program space *******************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+	org	INTERRUPT_ORG			; First location in program memory.
+;------------------------------------------------------------------------------
+; Interrupt Service Routine
+;------------------------------------------------------------------------------
+; Note: The interrupt code must always originate at address $0.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;------------------------------------------------------------------------------
+ISR					;3	The interrupt service routine...
+
+	; Put 306748Hz sample rate V.P. here!...
+
+;VP: VP Multitasker
+	;------------------------------------------------------------------------------
+	; Virtual Peripheral Multitasker:  8 tasks
+	;
+	;	Input variable(s): isr_multiplex: variable used to choose threads
+	;	Output variable(s): 		None, executes the next thread
+	;	Variable(s) affected: 		isr_multiplex
+	;	Flag(s) affected: 		None
+	;	Program Cycles:			10 cycles (turbo mode)
+	;------------------------------------------------------------------------------
+	_bank	isr_multiplex		;1
+	inc	isr_multiplex		;1		; toggle interrupt rates
+	mov	w,isr_multiplex		;1
+	and	w,#$07			;1
+; The code between the tableBegin and tableEnd statements MUST be 
+; completely within the first half of a page.  The routines 
+; it is jumping to must be in the same page as this table.
+tableStart				; Start all tables with this macro.
+	jmp	pc+w			;3
+	jmp	isr_1			;3,10 cycles
+	jmp	isr_2			;
+	jmp	isr_3			;
+	jmp	isr_4			;
+	jmp	isr_1			; call twice per rotation for sample rate ISR_rate/4
+	jmp	isr_5
+	jmp	isr_6			
+	jmp	isr_7
+tableEnd				; End all tables with this macro.
+;------------------------------------------------------------------------------
+; 13 cycles worst case to this point.
+;------------------------------------------------------------------------------
+
+
+;------------------------------------------------------------------------------
+;VP: VP Multitasker
+;*********************************************
+; ISR TASKS
+;*********************************************
+
+;------------------------------------------------------------------------------
+isr_1		; Serviced at ISR rate / 4
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 14 + 10 = 13
+;------------------------------------------------------------------------------
+;VP: FSK Detection
+	;------------------------------------------------------------------------------
+	; Virtual Peripheral: Zero-Cross timer for FSK detection
+	;
+	;	Requires a relatively high sampling rate for good timing resolution
+	;	on input frequencies.  (eg. 78.4kHz for 2100Hz/1300Hz)
+	;
+	;	Input variable(s): 	fskRxPort, fskRxMask set up for the proper port & pin:
+	;				- The following setup can be modified... used to receive
+	;				   FSK on rb.1:
+	;				
+	;				- fskRxPort is a port definition:
+	;					fskRxPort	equ	rb
+	;
+	;				- fskRxMask determines the pin to receive FSK on:
+	;					fskRxMask	equ	%00000010
+	;
+	;				- fskRxEn:	Enables this routine when set.
+	;
+	;	Output variable(s): 	- fskTransFlag1: indicates when a transition has occurred.
+	;				- fskThisTrans:  stores the timer value at the time when the
+	;						 transition occurred.
+	;	Variable(s) affected: 	- fskRxPortPast, fskTransCount
+	;	Flag(s) affected: 	- None
+	;	Program Cycles:		16 cycles worst case (turbo mode)
+	;------------------------------------------------------------------------------
+fskZeroCrossTimer
+
+	_bank	fskRxBank		;1
+	sb	fskRxEn			;1
+	jmp	:fskOut			;1		
+	inc	fskTransCount		;1
+	snz				;1
+	dec	fskTransCount		;1
+	mov	w,fskRxPortPast		;1
+	xor	w,fskRxPort		;1
+	and	w,#fskRxMask		;1
+	snz				;1
+	jmp	:fskOut			;1
+	xor	fskRxPortPast,w		;1
+	setb	fskTransFlag1		;1
+	mov	w,fskTransCount		;1
+	mov	fskThisTrans,w		;1
+	clr	fskTransCount		;1,16 cycles worst case
+:fskOut
+	;------------------------------------------------------------------------------
+
+	; Put 76687Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; worst case cycle count = 29 + 7 = 36 cycles worst case.
+
+
+
+
+
+
+;------------------------------------------------------------------------------
+isr_2		; Serviced at ISR rate / 8
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 13
+;------------------------------------------------------------------------------
+	page	fskReceive		;1
+	call	fskReceive		;34 worst case
+
+	; Put 38344Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles till end of ISR
+					; total cycles in this interrupt = 13 + 35 + 7 = 55
+
+
+
+
+
+;------------------------------------------------------------------------------
+isr_3		; Serviced at ISR rate / 8
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 14 + 10 = 13
+;------------------------------------------------------------------------------
+	
+;VP: 5ms Timer
+	_bank	timers			;1
+	dec	timer_div		;1
+	sz				;1
+	jmp	:timer_out		;1
+	mov	w,#TIMER_DIV_CONST	;1
+	mov	timer_div,w		;1 ; if the timer == the constant used for 5ms timeout
+	inc	timer_5ms		;1 ;	increment the 5ms timer
+	snz				;1 ;	if the 5ms timer rolls over
+	setb	timer_flag		;1 ;	{	set the timer flag
+					;  ;	}}	
+:timer_out
+;VP: Led Flasher
+	sb	timer_5ms.4		;1 ; toggle the LED pin, depending on the timer state.
+	setb	led_pin			;1
+	snb	timer_5ms.4		;1
+	clrb	led_pin			;1,13
+
+	; Put 38344Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; worst case cycle count = 13 + 13 + 7 = 33
+
+
+
+;------------------------------------------------------------------------------
+isr_4		; Serviced at ISR rate / 8
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 14 + 10 = 13
+;------------------------------------------------------------------------------
+;VP: VP Multiplexer 2
+	_bank	ISR_multiplex		;1 Use ISR_multiplex to multiplex this ISR.
+					;  so that routines in isr_4 are run at 9600bps.
+	mov	w,ISR_multiplex		;1
+	rr	wreg			;1 Divide ISR_multiplex by 2		
+	rr	wreg			;1 Divide ISR_multiplex by 4
+	rr	wreg			;1 Divide ISR_multiplex by 8
+	and	w,#%00000011		;1 Keep in range of table.
+
+; The code between the tableStart and tableEnd statements MUST be 
+; completely within the first half of a page.  The routines 
+; it is jumping to must be in the same page as this table.
+tableStart				; Begin all tables with this macro.
+
+	jmp	PC+w			;3
+	jmp	ISR_4_1			;3,25
+	jmp	ISR_4_2			
+	jmp	ISR_4_3			
+	jmp	ISR_4_4
+
+tableEnd				; End all tables with this macro.
+
+isr_4_1		; Serviced at ISR rate / 32
+	;------------------------------------------------------------------------------
+	; TOTAL CYCLE COUNT: 14 + 10 = 25
+	;------------------------------------------------------------------------------
+
+	; Put 9586Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; 25 + 7 cycles worst case = 32 cycles worst case
+
+isr_4_2		; Serviced at ISR rate / 32
+	;------------------------------------------------------------------------------
+	; TOTAL CYCLE COUNT: 14 + 10 = 25
+	;------------------------------------------------------------------------------
+
+	; Put 9586Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; 25 + 7 cycles worst case = 32 cycles worst case
+
+isr_4_3		; Serviced at ISR rate / 32
+	;------------------------------------------------------------------------------
+	; TOTAL CYCLE COUNT: 14 + 10 = 25
+	;------------------------------------------------------------------------------
+
+	; Put 9586Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; 25 + 7 cycles worst case = 32 cycles worst case
+
+isr_4_4		; Serviced at ISR rate / 32
+	;------------------------------------------------------------------------------
+	; TOTAL CYCLE COUNT: 14 + 10 = 25
+	;------------------------------------------------------------------------------
+
+	; Put 9586Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; 25 + 7 cycles worst case = 32 cycles worst case
+
+
+;------------------------------------------------------------------------------
+isr_5		; Serviced at ISR rate / 8
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 14 + 10 = 13
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+	page	rs232_transmit		;1
+	call	rs232_transmit		;22 Perform RS232 Transmission
+;VP: RS232 Receive
+	page	rs232_receive		;1
+	call	rs232_receive		;26
+
+	; Put 38344Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; worst case cycle count = 70 from beginning of ISR
+
+
+
+
+;------------------------------------------------------------------------------
+isr_6		; Serviced at ISR rate / 8
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 14 + 10 = 13
+;------------------------------------------------------------------------------
+;VP: FSK Demodulation
+	page	fskRxProc1	;1
+	call	fskRxProc1	;20
+	page	fskRxProc2	;1
+	call	fskRxProc2	;27
+
+	; Put 38344Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; worst case ISR cycle count = 13 + 21 + 28 + 7 = 69
+;------------------------------------------------------------------------------
+isr_7		; Serviced at ISR rate / 8
+;------------------------------------------------------------------------------
+; TOTAL CYCLE COUNT: 14 + 10 = 13
+;------------------------------------------------------------------------------
+
+	; Put 38344Hz sample rate V.P. here!...
+
+	jmp	ISR_out			;7 cycles until mainline program resumes execution
+					; worst case ISR cycle count = 13 + 7 = 20 cycles worst case.
+
+;------------------------------------------------------------------------------
+ISR_out					; ISR goes here when finished.
+;------------------------------------------------------------------------------
+
+isr_end						;3
+		mov	w,#-int_period		;1   ; refresh RTCC on return
+		retiw				;3,7 ; return from the interrupt
+						;    ; = 1/(int_period*RTCC prescaler*1/50MHz)
+						;    ; = 1/(163*1*20ns) = 3.26us
+;*****************************************************************************************
+; End of the Interrupt Service Routine
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+
+
+
+
+
+
+
+
+
+
+
+;**************************************************************************
+; INTERRUPT SERVICE ROUTINE SUBROUTINES
+;**************************************************************************
+
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+
+rs232_transmit
+	;------------------------------------------------------------------------------
+	; This is an asynchronous transmitter for RS-232 transmission.
+	; INPUTS:
+	;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+	;	tx_high		    -	Part of the data to be transmitted
+	;	tx_low		    -	Some more of the data to be transmitted
+	;	tx_count	    -	Counter that counts the number of bits transmitted.
+	; OUTPUTS:
+	;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+	; VARIABLE LENGTH?:	YES
+	; CYCLES FROM CALL:	22 CYCLES WORST CASE (TURBO)
+	;------------------------------------------------------------------------------
+					;3
+	_bank	rs232_tx_bank		;1
+
+	clrb    tx_divide.tx_baud_bit	;1 clear xmit timing count flag
+	inc     tx_divide		;1 only execute the transmit routine
+	STZ				;1 set zero flag for test
+	SNB     tx_divide.tx_baud_bit	;1  every 2^baud_bit interrupt
+	test    tx_count		;1 are we sending?
+	JZ      :tx_done		;2 if not, go to :receive
+	clc				;1 yes, ready stop bit
+	rr      tx_high			;1 and shift to next bit
+	rr      tx_low			;1
+	dec     tx_count		;1 decrement bit counter
+	movb    tx_pin,/tx_low.6	;4,19 output next bit
+
+:tx_done
+	retp				;3,22 cycles from call (worst case)
+;------------------------------------------------------------------------------
+;VP: RS232 Receive
+
+rs232_receive
+	;------------------------------------------------------------------------------
+	; This is an asynchronous receiver for RS-232 reception
+	; INPUTS:
+	;	rx_pin		   -	Pin that RS-232 is received on.
+	; OUTPUTS:
+	;	rx_byte		   -	The byte received
+	;	rx_flag		   -	Set when a byte is received.
+	; VARIABLE LENGTH?:	YES
+	; CYCLES FROM CALL:	26 CYCLES WORST CASE (TURBO)
+	;------------------------------------------------------------------------------
+					;3
+	_bank	rs232_rx_bank		;1
+	clc				;1
+	snb	rx_pin			;1
+	stc				;1 get current rx bit
+	test    rx_count		;1 currently receiving byte?
+	sz				;1
+	jmp	:rxbit			;1 if so, jump ahead
+	mov     w,#FSK_DATA_BITS + 1	;1 in case start, ready databits+1 bits
+	sc				;1 skip ahead if not start bit
+	mov     rx_count,w		;1 it is, so renew bit count
+	mov     rx_divide,#rx_start_delay ;2 ready 1.5 bit periods
+:rxbit	decsz	rx_divide		;1
+	jmp	:rxdone			;1 middle of next bit?
+	setb    rx_divide.rx_baud_bit	;1 yes, ready 1 bit period
+	dec	rx_count		;1 last bit
+	sz				;1 if not
+	rr      rx_byte			;1  then save bit
+	snz				;1 if so
+	setb    rs232_rx_flag		;1,22   then set flag
+:rxdone
+	retp				;3,26
+					; total worst case cycle time:  26 cycles
+;------------------------------------------------------------------------------
+;VP: FSK Serial Receive
+
+fskReceive	jmp	_fskReceive
+
+;------------------------------------------------------------------------------
+; JUMP table for interrupt service routine.
+; Must be completely contained in the first half of the first page.
+
+tableStart				; This macro will generate an error if the
+					; code is not within the first half of a page
+
+;VP: FSK Detection
+fskRxProc1	jmp	_fskRxProc1
+fskRxProc2	jmp	_fskRxProc2
+
+tableEnd				; This macro will generate an error if the
+					; code is not within the first half of a p
+;------------------------------------------------------------------------------
+
+
+;*****************************************************************************************
+org	INTERRUPT_ORG2
+;*****************************************************************************************
+; VP:  FSK Receive
+_fskReceive
+
+	;------------------------------------------------------------------------------
+	; This is an asynchronous receiver for fsk demodulation
+	; INPUTS:
+	;	fskRxBit	   -	Bit that indicates the current incoming frequency
+	; OUTPUTS:
+	;	fskRxByte	   -	The byte received
+	;	fskRxFlag	   -	Set when a byte is received.
+	;	fskRxFlagISR	   - 	Flag set to indicate to the ISR that a byte is 
+	;				received.
+	; VARIABLE LENGTH?:	YES
+	; CYCLES FROM CALL:	34 CYCLES WORST CASE (TURBO) including call and return.
+	;------------------------------------------------------------------------------
+					;6
+	_bank	fskRxBank		;1
+	clc				;1
+	snb	fskRxBit		;1
+	stc				;1 get current rx bit
+	test    fskRxCount		;1 currently receiving byte?
+	sz				;1
+	jmp	:rxBit			;1 if so, jump ahead
+	mov     w,#9			;1 in case start, ready 9 bits
+	sc				;1 skip ahead if not start bit
+	mov     fskRxCount,w		;1 it is, so renew bit count
+	mov     fskRxDivide,#fskRx_start_delay ;2 ready 1.5 bit periods
+:rxbit	decsz	fskRxDivide		;1
+	jmp	:fskRxDone		;1 middle of next bit?
+	setb    fskRxDivide.fskRx_baud_bit;1 yes, ready 1 bit period
+	dec	fskRxCount		;1 last bit
+	sz				;1 if not
+	rr      fskRxTemp		;1  then save bit
+	sz				;1 if so
+	jmp	:fskRxDone		;1
+:fskGotByte
+	jnb	fskRxBit,:fskRxDone	;1
+	setb    fskRxFlag		;1,28   then set flag
+	mov	fskRxByte,fskRxTemp	;2
+:fskRxDone
+	retp				;3,34
+					; total worst case cycle time:  34 cycles
+;------------------------------------------------------------------------------
+_fskRxProc1
+	;------------------------------------------------------------------------------
+	; 	This code removes some of the jitter away from
+	; 	the low frequency detection algorithm by
+	; 	continuously checking the transition count
+	; 	to see if it has now reached a point where it
+	; 	is safe to say that there is no high frequency
+	; 	present.
+	;
+	;	Input variable(s):	fskTransCount,fskThisTrans, FSK_TH constant
+	;
+	;	Output variable(s): 	fskRxBit
+	;
+	;	Variable(s) affected: 	isrTemp0,fskRxBit
+	;
+	;	Flag(s) affected: 	none
+	;	CYCLES:			20 cycles worst case
+	;	VARIABLE LENGTH?:	YES
+	;------------------------------------------------------------------------------
+						;6
+	_bank	fskRxBank			;1
+	sb	fskRxEn				;1
+	jmp	:fskOut				;1
+	mov	isrTemp0,fskTransCount		;2
+	add	isrTemp0,fskThisTrans		;2
+	mov	w,#$ff				;1
+	snc					;1
+	mov	isrTemp0,w			;1
+	csbe	isrTemp0,#(FSK_TH+FSK_HYS)	;3
+	setb	fskRxBit			;1
+:fskOut		
+	retp					;3,20 cycles worst case from call
+;------------------------------------------------------------------------------
+_fskRxProc2
+	;------------------------------------------------------------------------------
+	; 	This subroutine runs only when a transition has
+	; 	occurred.  It adds the last transition count
+	; 	to the current one and checks this against the
+	; 	high/low frequency threshold.  If the transition
+	; 	count is below the threshold, the fsk_rx_bit
+	; 	flag is cleared.
+	;
+	;	Input variable(s):	fskThisTrans, fskLastTrans, fskTransFlag1, FSK_TH constant
+	;
+	;	Output variable(s): 	fskRxBit
+	;
+	;	Variable(s) affected: 	isrTemp0,fskRxBit,fskLastTrans
+	;
+	;	Flag(s) affected: 	none
+	;	CYCLES:			27 cycles worst case
+	;	VARIABLE LENGTH?:	YES
+	;------------------------------------------------------------------------------
+						;6
+	_bank	fskRxBank			;1
+	sb	fskTransFlag1			;1
+	jmp	:fskOut				;1	; Exit if disabled
+	clrb	fskTransFlag1			;1
+	cjb	fskThisTrans,#10,:glitch 	;4	; compare the transition count with 7
+	mov	isrTemp0,fskThisTrans		;2
+	add	isrTemp0,fskLastTrans		;2
+	mov	w,#255				;1
+	snc					;1
+	mov	isrTemp0,w			;1
+	csa	isrTemp0,#(FSK_TH-FSK_HYS)	;3
+	clrb	fskRxBit			;1
+	mov	w,fskThisTrans			;1	; save the last transition count.
+	mov	fskLastTrans,w			;1
+:fskOut	
+	retp					;3,27	; 27 cycles worst case from call.
+:glitch
+						;16	; If this transition count was a glitch, then save the result as part
+	mov	w,fskLastTrans			;1	; of the last transition
+	add	w,fskThisTrans			;1
+	snc					;1
+	mov	w,#$ff				;1
+	mov	fskLastTrans,w			;1
+	jmp	:fskOut				;3,24
+	
+;------------------------------------------------------------------------------
+
+;*****************************************************************************************
+org	RESET_ENTRY_ORG
+;*****************************************************************************************
+;------------------------------------------------------------------------------
+reset_entry					; Program starts here on power-up
+	page	_reset_entry
+	jmp	_reset_entry
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+;*****************************************************************************************
+org	SUBROUTINES_ORG
+;*****************************************************************************************
+; Subroutines
+;*****************************************************************************************
+;------------------------------------------------------------------------------
+;VP: RS232 Receive
+; Subroutine - Get byte via serial port.
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in byte and w register
+;------------------------------------------------------------------------------
+get_byte     	jnb     rs232_rx_flag,$		;wait till byte is received
+		clrb    rs232_rx_flag		;reset the receive flag
+		_bank	rs232_rx_bank		;switch to rs232 bank
+
+		mov     byte,rx_byte		;store byte (copy using W)
+
+		retp
+;------------------------------------------------------------------------------
+;VP: FSK Receive
+; Subroutine - Get byte via FSK demodulation
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in fskByte and w register
+;------------------------------------------------------------------------------
+fskGetByte     	jnb     fskRxFlag,$		;wait till byte is received
+		clrb    fskRxFlag		;reset the receive flag
+		_bank	fskRxBank		;switch to fskRx bank
+
+		mov     fskByte,fskRxByte	;store byte (copy using W)
+		retp
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;------------------------------------------------------------------------------
+send_byte
+	    	_bank    rs232_tx_bank
+	
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+IFDEF	HARDWARE_FLOW_CONTROL
+		jb	rts,$			;wait for RTS to be low.
+ENDIF
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#11            ;1 start + 8 data + 1 stop bit
+
+:out
+		RETP                            ;leave and fix page bits
+
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;------------------------------------------------------------------------------
+send_string
+		_bank	rs232_tx_bank
+ 		mov     string,w                ;store string address
+:loop
+		mov	w,#STRINGS_ORG>>8	; with indirect addressing
+		mov	m,w
+		mov     w,string                ;read next string character
+		iread                           ; using the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		jmp	:out                    ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		_bank	rs232_tx_bank
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+:out		mov	w,#$1F			;reset the mode register
+		mov	m,w
+		retp
+
+;------------------------------------------------------------------------------
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+; OUTPUTS:
+;	byte	-	The uppercase byte
+;------------------------------------------------------------------------------
+uppercase    	stc
+		csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+		stc
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;------------------------------------------------------------------------------
+;VP: 5ms Timer
+delay_100n_ms
+; This subroutine delays 'w'*100 milliseconds. (not exactly, but pretty close)
+; This subroutine uses the localTemp0 register
+; INPUT		w	-	w/100 milliseconds to delay for.
+; OUTPUT	Returns after 100 * n milliseconds.
+;------------------------------------------------------------------------------
+	mov	localTemp0,w
+	_bank	timers
+	clr	timer_div	; This loop delays for 100ms
+:loop	
+	mov	timer_5ms,#-20	; delay 100ms
+	clrb	timer_flag	; clear the flag and
+	jnb	timer_flag,$	;   wait until the timer_flag is set.
+	decsz	localTemp0	; and do this w times.
+	jmp	:loop
+	retp
+;------------------------------------------------------------------------------
+;VP: 62-byte buffer
+; Subroutine:  Initialize the buffer.  
+;	INPUTS:		None
+;	OUTPUTS:
+;			- buffer[0] = NUL
+;			- pushIndex->buffer[0]
+;			- popIndex->buffer[0]
+;	CHANGES:	buffer[0], pushIndex, popIndex	
+;------------------------------------------------------------------------------
+bufferInit
+	_bank	buffer
+	mov	w,#buffer	
+	mov	pushIndex,w		; set up indexes into the buffer
+	mov	popIndex,w		; pointers must point to #buffer.
+	clr	buffer + 0		; clear the first location in the buffer.
+	retp
+;------------------------------------------------------------------------------
+;VP: 62-byte buffer
+; Subroutine:  Store W in buffer[pushIndex++]
+;	INPUTS:		data to store in W
+;	OUTPUTS:	data stored in buffer[pushIndex++]
+;	CHANGES:	localTemp1,pushIndex,buffer[pushIndex]
+;------------------------------------------------------------------------------
+bufferPush
+	mov	localTemp1,w
+	_bank	buffer
+	mov	fsr,pushIndex
+	mov	indf,localTemp1
+	_bank	buffer
+	INCP	pushIndex		; Smart-Increment of the pointer to RAM
+	retp
+;------------------------------------------------------------------------------
+;VP: 62-byte buffer
+; Subroutine:  Retrieve data in buffer[popIndex++]
+;	INPUTS:		popIndex
+;	OUTPUTS:	data stored in buffer[popIndex] in W register
+;	CHANGES:	popIndex
+;------------------------------------------------------------------------------
+bufferPop
+	_bank	buffer
+	mov	fsr,popIndex
+	mov	w,indf
+	_bank	buffer
+	INCP	popIndex		; Smart-Increment of the pointer to RAM
+	retp
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;VP: RS232 Transmit
+;*****************************************************************************************
+; String Data
+;*****************************************************************************************
+org	STRINGS_ORG		; This label defines where strings are kept in program space.
+				; all of the following strings must be within the same 1/2
+				; page of program memory for send_string to work, and they
+				; must be preceded by this label.
+
+_hello          dw      13,10,13,10,'Caller ID 3.0',13,10,'- Connect to phone line and call modem for CALLER-ID',13,10,0
+_DATE		dw	13,10,'DATE:   ',0
+_TIME		dw	13,10,'TIME:   ',0
+_NAME		dw	13,10,'NAME:   ',0
+_NUMBER		dw	13,10,'NUMBER: ',0
+_CID		dw	13,10,'Incoming Caller ID...',0
+;*****************************************************************************************
+org	PAGE3_ORG
+;*****************************************************************************************
+
+; Nothing here!
+
+;*****************************************************************************************
+org	MAIN_PROGRAM_ORG
+;*****************************************************************************************
+;*****************************************************************************************
+; RESET VECTOR 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Program execution begins here on power-up or after a reset
+	;*********************************************************************************
+_reset_entry		
+	;*********************************************************************************
+	; Initialise all port configuration
+	;*********************************************************************************
+
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_ST            	;Setup RD Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_ST            	;Setup RE Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_LVL            	;Setup RD CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rd,w		
+		mov     w,#RE_LVL            	;Setup RE CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!re,w		
+ENDIF
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_PLP            	;Setup RD Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_PLP            	;Setup RE Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+IFDEF SX48_52
+		mov	w,#RD_DDIR		;Setup RD Direction register, 0 = output, 1 = input
+		mov	!rd,w			
+		mov	w,#RE_DDIR		;Setup RE Direction register, 0 = output, 1 = input
+		mov	!re,w			
+ENDIF
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+IFDEF SX48_52
+		mov     w,#RD_latch         	;Initialize RD data latch
+		mov     rd,w			
+		mov     w,#RE_latch         	;Initialize RE data latch
+		mov     re,w			
+ENDIF
+
+
+	;*********************************************************************************
+	; Clear all Data RAM locations
+	;*********************************************************************************
+zero_ram
+IFDEF SX48_52   				;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zero_ram	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+
+		_bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+ELSE     					;SX18/20/28 RAM clear routine
+		clr	fsr			;reset all ram banks
+:zero_ram	sb	fsr.4			;are we on low half of bank?
+		setb	fsr.3			;If so, don't touch regs 0-7
+		clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+ENDIF
+	;*********************************************************************************
+	; Initialize program/VP registers
+	;*********************************************************************************
+
+
+	;*********************************************************************************
+	; Setup and enable RTCC interrupt, WREG register, RTCC/WDT prescaler
+	;*********************************************************************************
+
+RTCC_ON		=	%10000000	;Enables RTCC at address $01 (RTW hi)
+					;*WREG at address $01 (RTW lo) by default
+RTCC_ID		=	%01000000	;Disables RTCC edge interrupt (RTE_IE hi)
+					;*RTCC edge interrupt (RTE_IE lo) enabled by default
+RTCC_INC_EXT	=	%00100000	;Sets RTCC increment on RTCC pin transition (RTS hi)
+					;*RTCC increment on internal instruction (RTS lo) is default
+RTCC_FE		=	%00010000	;Sets RTCC to increment on falling edge (RTE_ES hi)
+					;*RTCC to increment on rising edge (RTE_ES lo) is default
+RTCC_PS_ON	=	%00000000	;Assigns prescaler to RTCC (PSA lo)
+RTCC_PS_OFF	=	%00001000	;Assigns prescaler to WDT (PSA lo)
+PS_000		=	%00000000	;RTCC = 1:2, WDT = 1:1
+PS_001		=	%00000001	;RTCC = 1:4, WDT = 1:2
+PS_010		=	%00000010	;RTCC = 1:8, WDT = 1:4
+PS_011		=	%00000011	;RTCC = 1:16, WDT = 1:8
+PS_100		=	%00000100	;RTCC = 1:32, WDT = 1:16
+PS_101		=	%00000101	;RTCC = 1:64, WDT = 1:32
+PS_110		=	%00000110	;RTCC = 1:128, WDT = 1:64
+PS_111		=	%00000111	;RTCC = 1:256, WDT = 1:128
+
+OPTIONSETUP	equ	RTCC_PS_OFF|PS_111	; the default option setup for this program.
+		mov	w,#OPTIONSETUP		; setup option register for RTCC interrupts enabled 
+		mov	!option,w		; and no prescaler.
+		jmp	@main
+
+;*****************************************************************************************
+; MAIN PROGRAM CODE 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Main
+	;*********************************************************************************
+main		
+	call	@bufferInit		; Initialize the buffer.
+	;------------------------------------------------------------------------------
+	; Initialize some more stuff...
+	;------------------------------------------------------------------------------
+
+	setb	hook			; go on-hook
+	setb	tx_pin			; set the RS-232 transmit pin.
+	clrb	CTS			; Allow the PC to transmit to the SX Modem.
+
+	;------------------------------------------------------------------------------
+	; Greet the user...
+	;------------------------------------------------------------------------------
+	mov	w,#_hello		; Say "Hello!"
+	page	send_string
+	call	send_string
+
+	;------------------------------------------------------------------------------
+	; get Caller-ID
+	;------------------------------------------------------------------------------
+getCID
+	setb	fskRxEn			; enable FSK detection
+	mov	localTemp0,#10		; use localTemp0 to count from 10
+	;------------------------------------------------------------------------------
+	; First, wait until 10 U's are received by FSK.
+	;------------------------------------------------------------------------------
+
+:U_LOOP
+	sb	ring
+	jmp	:ringReceived		; Ring?  Then exit
+	sb	fskRxFlag
+	jmp	:U_LOOP			; Skip if byte received...
+	call	@fskGetByte		; Get a byte via. FSK
+	xor	w,#'U'			; compare it with 'U'
+	sz	
+	jmp	getCID			; if not equal, reload counter.
+	decsz	localTemp0		; decrement the 'U' counter
+	jmp	:U_LOOP			; if not zero yet, get another 'U'
+
+	;------------------------------------------------------------------------------
+	; Now wait until no more U's are received.
+	;------------------------------------------------------------------------------
+	_bank	timers			; start a timer, so CID reception times out.
+	clr	timer_5ms		; after 256 * 5ms
+	clrb	timer_flag		
+
+:U_LOOP2
+	sb	ring
+	jmp	:ringReceived		; Ring?  Then exit.
+	snb	timer_flag
+	jmp	:ringReceived		; Timer expired?  Then exit.
+	sb	fskRxFlag
+	jmp	:U_LOOP2		; No Byte?  Try again.
+	call	@fskGetByte		; Get a byte via. FSK
+	xor	w,#'U'			; if byte == 'U', get another byte.
+	snz				; else...
+	jmp	:U_LOOP2
+
+	;------------------------------------------------------------------------------
+	; Get FSK bytes and, if they are valid, store 
+	;------------------------------------------------------------------------------
+:cidLoop
+	sb	ring			; Ring?  Then exit
+	jmp	:ringReceived
+	snb	timer_flag		; Timer expired?  Then exit.
+	jmp	:ringReceived
+	sb	fskRxFlag		; No Byte?  Try again.
+	jmp	:cidLoop
+	call	@fskGetByte		; Get a byte via. FSK
+
+					; if the received byte = any of these bytes, it is a
+					; header ( Indicating the beginning of a CID string)
+					; so get the rest of the string.
+	mov	w,fskByte		
+	xor	w,#01
+	snz
+	jmp	:storeType
+	mov	w,fskByte
+	xor	w,#02
+	snz
+	jmp	:storeType
+	mov	w,fskByte
+	xor	w,#04
+	snz
+	jmp	:storeType
+	mov	w,fskByte
+	xor	w,#07
+	snz
+	jmp	:storeType
+	jmp	:cidLoop
+
+:storeType				; Store the header in the buffer.
+	_bank	fskRxByte
+	mov	w,fskByte
+	call	@bufferPush
+
+:getSize				; Get the next byte, which indicates the size of the string.
+	sb	ring			; Ring?  Then exit.
+	jmp	:ringReceived	
+	snb	timer_flag		; Timer expired?  Then exit.
+	jmp	:ringReceived
+	sb	fskRxFlag		; No Byte?  Try again.
+	jmp	:getSize
+	call	@fskGetByte		; get a byte via FSK.
+	mov	localTemp0,w		; save in counter and get the string of length (counter)
+
+:stringLoop
+	sb	ring			; Ring?  Then exit.
+	jmp	:ringReceived
+	snb	timer_flag		; Timer expired?  Then exit.
+	jmp	:ringReceived
+	sb	fskRxFlag		; No byte?  Try again.
+	jmp	:stringLoop		
+	call	@fskGetByte		; get a byte via FSK.
+	call	@bufferPush		; push it onto the buffer.
+	decsz	localTemp0		; if (--counter) >0, do again.
+	jmp	:stringLoop
+	mov	w,#0			; else store a Null in the buffer.
+	call	@bufferPush		
+	jmp	:cidLoop		; and return to the top.
+
+:ringReceived
+	_bank	buffer			; Timer expired or a ring was received.
+	test	buffer			; If buffer[0], outputCID()
+	snz
+	jmp	:noCID
+
+;**************************************************************************
+:outputCID
+;	This routine outputs a 'CID Captured...' string, and proceeds
+;	to fetch the stored caller-ID strings from the ascii-buffer
+;	and output them to the screen.  It parses the buffer into NAME,
+;	NUMBER, DATE, and TIME.  It uses the headers $01, $04, $02, and $07
+;	as indications of what string is being retrieved.
+;**************************************************************************
+	_bank	buffer
+	mov	pushIndex,#buffer4+15
+	mov	w,#_CID				; Send 'CID Captured'
+	call	@send_string
+
+:output_loop
+	call	@bufferPop			; Get a byte from the ascii buffer.
+	mov	localTemp0,w
+
+	mov	w,#01
+	xor	w,localTemp0
+	snz
+	jmp	:output_date_time 		; If the byte = 01, the following string is the date/time
+	mov	w,#04
+	xor	w,localTemp0
+	snz
+	jmp	:output_date_time 		; If the byte = 04, the following string is the date/time
+	mov	w,#02
+	xor	w,localTemp0
+	snz
+	jmp	:output_number			; If the byte = 02, the following string is the number
+	mov	w,#07
+	xor	w,localTemp0
+	snz
+	jmp	:output_name			; if the byte = 07, the following string is the name
+	_bank	buffer
+	mov	w,popIndex			; compare the pushIndex with the popIndex.  If equal, we are done.
+	xor	w,pushIndex
+	jz	:cidDone			
+	jmp	:output_loop			; return.
+
+
+:output_date_time				; OUTPUT DATE/TIME
+	mov	w,#_DATE			; Output 'DATE: '
+	call	@send_string
+	call	:output_2			; Output 2 bytes of the buffer
+	mov	w,#'/'				; Output '/'
+	call	@send_byte
+	call	:output_2			; Output 2 bytes of the buffer
+	mov	w,#_TIME			; Output 'TIME'
+	call	@send_string
+	call	:output_2			; Output 2 bytes of the buffer
+	mov	w,#':'				; Output ':'
+	call	@send_byte
+	call	:output_2			; Output 2 bytes of the buffer
+	call	@bufferPop			; Get a value from the buffer
+	test	wreg
+	jz	:output_loop			;   output the phone number
+
+:output_number					; OUTPUT PHONE NUMBER
+	mov	w,#_NUMBER			; Output 'NUMBER: '
+	call	@send_string			
+	call	:output_null			; Output the null-terminated string from the buffer
+	jmp	:output_loop			; go back for more
+
+:output_name					; OUTPUT NAME
+	mov	w,#_NAME			; Output 'Name: '
+	call	@send_string				
+	call	:output_null			; Output the null-terminated string from the buffer
+	jmp	:output_loop			; go back for more
+
+	;**************************************************************************
+:output_2
+	; Outputs 2 bytes from the ascii-buffer.  Outputs the value at which the ascii_index is pointing,
+	; the value following it, and returns with the ascii_index pointing to the next byte in the 
+	; buffer.
+	;**************************************************************************
+
+	call	@bufferPop			; Get the byte that the index points to.
+	call	@send_byte			; Send it to the terminal
+	call	@bufferPop			; Get the byte that the index points to.
+	call	@send_byte			; Send it to the terminal
+	ret
+
+	;**************************************************************************
+:output_null
+	; Outputs a null-terminated string from the buffer.  Begins with the byte which the index
+	; currently points to, and stops when it encounters a null termination in the buffer.  
+	; Exits with the index pointing at the first byte past the null.
+	;**************************************************************************
+:loop
+	call	@bufferPop			; Get the byte that the index points to.
+	test	wreg
+	jz	:null_done			; If it is not == null
+	call	@send_byte			;  send it to the terminal.
+	jmp	:loop				
+:null_done
+	
+	ret					; Return to calling program.
+		
+
+
+:cidDone
+:noCID
+	call	@bufferInit			; Re-initialize the buffer
+	jmp	getCID				; and get another caller-ID string.
+;*****************************************************************************************
+END		;End of program code
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************

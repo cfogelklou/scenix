@@ -1,0 +1,435 @@
+;******************************************************************************
+; Copyright © [01/25/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+ ;Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;
+; Filename:	v_23_tx_1_0.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.00
+;
+; Date:		April 16, 1999.
+;
+; Part:		SX28AC rev. 2.5
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.0
+;
+; Program Description:	This simple program encodes an outgoing v.23 signal.
+;			This program only creates the answer frequencies, since it
+;			cannot dial out to originate.
+;
+;			To use this program, connect the SX-DTMF-DEMO board to a phone
+;			line and to a PC.  The communications settings are 1200,N,8,1.
+;			Now, from a remote V.23 modem, simply dial the modem's number.
+;			When you here the line ringing on the dialing modem, press a key
+;			in the comm window of the SX-modem-board.  This should force the
+;			modem board off-hook and cause it to send out an answer tone for
+;			3 seconds.  Once the answer tone is sent, the modem board will
+;			begin modulating the state of the RS-232 pin onto the carrier.
+;			If the terminal program is set up correctly, you will be able to
+;			receive the sent characters on the remote modem.
+;
+; Revision History:  	1.0  Wrote the program. It worked.
+;			1.01 Documentation (May 4, 1999)
+;
+;	INPUTS:
+;	Received RS-232 characters on rs-232 rx_pin (ra.1)
+;	OUTPUTS:
+;	Received RS-232 characters on tx_pin (ra.2)
+;	FSK output on PWM_pin
+;	LED flashes (rb.0)
+;
+;	RESOURCES:
+;       Program memory: TBD
+;       Data memory:	TBD
+;       I/O Count:	TBD
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+		device	pins28,pages4,banks8,carryx	; 28-pin device, 1 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'B103TX10'			; Version = 1.0
+
+		reset	reset_entry			; JUMP to reset_entry label on reset
+
+;******************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;******************************************************************************
+watch	fsk_answering,1,ubin
+watch	freq_acc_low,16,udec
+watch	freq_count_low,16,udec
+watch	sine_index,8,udec
+watch	PWM0_out,8,udec
+
+;******************************************************************************
+; Macros (These only required on SX DTMF DEMO board)
+;******************************************************************************
+; oldboard		; Uncomment this if board is not marked rev 1.4 or uses
+			; a DIP SX package.			
+disable_o	macro	0		; This macro disables the output
+	ifdef	oldboard
+		setb	in_out		; switch on the new modem boards.
+	else
+		clrb	in_out
+	endif
+		clr	flags
+		endm
+;*************************************************************
+enable_o	macro	0		; This macro enables the output
+;*************************************************************
+ifdef		old_board
+		clrb	in_out		; switch on the new modem boards.
+  else		
+		setb	in_out
+endif
+		clr	flags
+		endm
+;*************************************************************
+
+;******************************************************************************
+; Equates for FSK generation
+;******************************************************************************
+f390_h		equ	$00a
+f390_l		equ	$06a
+
+f450_h		equ	$00c
+f450_l		equ	$004
+f1300_h		equ	$022	; 2100Hz Signifies LOW data in Bell202 Spec
+f1300_l		equ	$0b7
+
+f2100_h		equ	$038	; 2100Hz Signifies LOW data in Bell202 Spec
+f2100_l		equ	$015
+
+;******************************************************************************
+; Pin Definitions (These definitions are for SX DTMF DEMO boards)
+;******************************************************************************
+	PWM_pin		equ	ra.0
+	rx_pin		equ	ra.1		; RS-232 Input pin
+	tx_pin		equ	ra.2		; RS-232 Output pin
+	in_out		equ	ra.3		; Switches between output
+					; and input on SX DTMF DEMO boards.
+	led_pin		equ	rb.0		; Flashes while characters are
+					; being received.
+	hook		equ	rb.4		; Goes on/off-hook.
+	test_pin	equ	rc.7
+	ring		equ	rb.3		; Ring detection pin
+
+;******************************************************************************
+; Global Variables
+;******************************************************************************
+		org	$8		; Global registers
+
+	flags	ds	1
+		sine_gen_en	equ	flags.1
+		timer_flag	equ	flags.2
+		fsk_tx_en	equ	flags.3
+	temp	ds	1
+;******************************************************************************
+; Bank 0 Variables
+;******************************************************************************
+		org	$10
+
+fsk_transmit_bank	=	$
+	fsk_flags	ds	1
+	fsk_answering	equ	fsk_flags.0
+	fsk_tx_bit	equ	fsk_flags.1
+sine_gen_bank		=	$
+	freq_acc_low	ds	1	; 16-bit accumulator which decides when to increment the sine wave
+	freq_acc_high	ds	1	; 
+	freq_count_low	ds	1	; 16-bit counter which decides which frequency for the sine wave
+	freq_count_high	ds	1	; freq_count = Frequency * 6.83671552
+	sine_index	ds	1
+
+;******************************************************************************
+; Bank 1 Variables
+;******************************************************************************
+		org	$30
+PWM_bank		=	$
+	PWM0_acc	ds	1
+	PWM0_out	ds	1
+timers			=	$
+	timer_l		ds	1
+	timer_h		ds	1
+	
+
+
+
+
+
+
+;************************ Beginning of program space ***************************
+;******************************************************************************
+; Interrupt
+		org	$0			; The interrupt Service routine starts at location zero.
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+PWM_output
+		bank	PWM_bank		; Update the PWM pin
+		clc
+		add	PWM0_acc,PWM0_out
+		snc
+		setb	PWM_pin
+		sc
+		clrb	PWM_pin
+;******************************************************************************
+FSK_output
+		snb	fsk_tx_en		; If fsk is enabled, decode fsk_tx_bit
+		call	@TRANSMIT_FSK		; into its corresponding frequencies
+		snb	sine_gen_en		; Output the frequencies set by the freq_count registers
+		call	@sine_generator
+;******************************************************************************
+do_timers
+		bank	timers			; Update the timers
+		inc	timer_l
+		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+		setb	led_pin
+		sb	timer_h.6
+		clrb	led_pin
+;******************************************************************************
+:ISR_DONE
+; This is the end of the interrupt service routine.  Now load 163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;******************************************************************************
+; End of the Interrupt Service Routine
+;******************************************************************************
+
+;******************************************************************************
+reset_entry
+; Program Starts Here on Power Up
+;******************************************************************************
+
+		call	@init
+
+		jb	rx_pin,$
+
+;		jb	ring,$
+
+		enable_o			
+
+
+		setb	fsk_answering		; enable answer frequencies
+		mov	!option,#%00011111	; enable wreg and rtcc interrupt
+		clr	flags
+		setb	hook			; pick up the line
+		
+
+main
+		bank	sine_gen_bank		; send out the answer tone for 3 seconds
+		mov	freq_count_high,#f2100_h 
+		mov	freq_count_low,#f2100_l
+		setb	sine_gen_en		; enable the FSK transmitter
+		mov	w,#255
+		call	@delay_10n_ms
+		mov	w,#45
+		call	@delay_10n_ms
+		bank	fsk_transmit_bank
+		setb	fsk_tx_en
+:loop
+		movb	fsk_tx_bit,rx_pin	; move the rs-232 pin to the fsk_tx_bit
+		movb	tx_pin,rx_pin		; and echo the received characters.
+		jmp	:loop			; jump here forever (ISR does all the work)
+
+;************************* Page 2 of Program Space *********************************
+org	$200
+
+;**************************************************************************
+TRANSMIT_FSK
+; Part of interrupt service routine!!!
+; This code sends out the proper frequency for the transmitted bit level.
+; It takes into consideration whether or not the modem is in answer or
+; originate mode.
+;**************************************************************************
+		bank	fsk_transmit_bank
+		jb	fsk_answering,transmit_answer_tones
+transmit_originate_tones
+		jb	fsk_tx_bit,:low_freq
+:high_freq
+		mov	freq_count_high,#f450_h
+		mov	freq_count_low,#f450_l
+		retp
+:low_freq	
+		mov	freq_count_high,#f390_h
+		mov	freq_count_low,#f390_l
+		retp
+transmit_answer_tones
+		jb	fsk_tx_bit,:low_freq
+:high_freq
+		mov	freq_count_high,#f2100_h
+		mov	freq_count_low,#f2100_l
+		retp
+:low_freq	
+		mov	freq_count_high,#f1300_h
+		mov	freq_count_low,#f1300_l
+		retp
+;**************************************************************************
+sine_generator
+; This routine generates a sine wave with values ranging
+; from -32 to 32.  Frequency is specified by the counter.  To set the
+; frequency, put this value into the 16-bit freq_count register:
+; freq_count = FREQUENCY * 6.83671552 (@50MHz)
+;**************************************************************************
+		bank	sine_gen_bank
+		clc
+		add	freq_acc_low,freq_count_low
+		add	freq_acc_high,freq_count_high
+		sc
+		retp
+		inc	sine_index
+		mov	w,sine_index
+		and	w,#$1f
+		call	sine_table
+		bank	PWM_bank	; center the sine wave around 128
+		clr	PWM0_out
+		setb	PWM0_out.7
+		add	PWM0_out,w
+		retp
+;******************************************************************************
+sine_table
+; The values in this table can be changed to increase/decrease the amplitude of
+; the output sine wave.
+;******************************************************************************
+	clc
+	jmp	pc+w
+	retw	0
+	retw	6
+	retw	12
+	retw	17
+	retw	22
+	retw	26
+	retw	29
+	retw	30
+	retw	31
+	retw	30
+	retw	29
+	retw	26
+	retw	22
+	retw	17
+	retw	12
+	retw	6
+	retw	0
+	retw	-6
+	retw	-12
+	retw	-17
+	retw	-22
+	retw	-26
+	retw	-29
+	retw	-30
+	retw	-31
+	retw	-30
+	retw	-29
+	retw	-26
+	retw	-22
+	retw	-17
+	retw	-12
+	retw	-6
+;**************************************************************************
+org	$400	; Miscellaneous subroutines
+;**************************************************************************
+delay_10n_ms
+; This subroutine delays 'w'*10 milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after 10 * n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 10ms
+	mov	timer_h,#$0f4
+	mov	timer_l,#$004
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;**************************************************************************
+delay_n_ms
+; This subroutine delays 'w' milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 1ms
+	mov	timer_h,#$0fe
+	mov	timer_l,#$0cd
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;**************************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;**************************************************************************
+init
+;**************************************************************************
+		mov	m,#$0c			; Initialize SX.
+		mov	!rb,#%11111101		; enable Schmidt trigger on rb1 (for FSK receive)
+
+		mov	m,#$0f			
+		mov	 ra,#%0110		; init ra
+		mov	!ra,#%0010		; ra0-1 = input, ra2-3 = output
+		mov	 rb,#%00000000		; init rb
+		mov	!rb,#%11101110		; rb1 = FSK input, rb0 = output for LED,rb5 = hook
+		mov	!rc,#%01111111		; rb1 = FSK input, rb0 = output for LED,rb5 = hook
+		call	zero_ram
+		clrb	hook			; go on hook.
+		setb	led_pin			; turn on LED
+		clr	flags			; Clear all flags
+		retp
+;******************************************************************************
+;        Copyright © 1998 Scenix Semiconductor, Inc. All rights
+;        reserved.
+;        
+;        Scenix Semiconductor, Inc. assumes no responsibility or liability for
+;        the use of this [product, application, software, any of these products].
+;        
+;        Scenix Semiconductor conveys no license, implicitly or otherwise, under
+;        any intellectual property rights.
+;        Information contained in this publication regarding (e.g.: application,
+;        implementation) and the like is intended through suggestion only and may
+;        be superseded by updates. Scenix Semiconductor makes no representation
+;        or warranties with respect to the accuracy or use of these information,
+;        or infringement of patents arising from such use or otherwise.
+;        
+;        Scenix Semiconductor products are not authorized for use in life support
+;        systems or under conditions where failure of the product would endanger
+;        the life or safety of the user, except when prior written approval is
+;        obtained from Scenix Semiconductor.
+;******************************************************************************

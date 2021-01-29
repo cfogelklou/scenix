@@ -1,0 +1,372 @@
+FrameInfoSeg		MACRO
+;********************************************************************************
+;  FRAMING LAYER
+;********************************************************************************
+;
+; Receive  : Processes incomming characters and passes payload to payload layer
+; Transmit : Frames and applies transparency to payload data
+;
+;********************************************************************************
+;
+; Normal Frame Format:  Allowable:  Send:
+;   n * FF		n >= 0      n = 10
+;   n * BOF		n >= 1      n = 1
+;   n * Payload data
+;   2 * FCS
+;   1 * EOF
+;
+; FCS - Frame Check Sequence
+;   16 bit CCITT CRC sent low byte first
+;   Transmit : send the complement of the calculated FCS
+;   Receive  : include FCS bytes in calculation of the FCS, FCS will equal $f0b8 if valid
+;   Note : FCS covers the payload data only.
+;          It is calculated prior to adding any transparency bytes (ie FCS bytes must also be transparent).
+;
+; Transparency:
+;   CE(=$7D)	indicates transparency issue
+;   CE EOF	incicates sender has terminated packet
+;   CE BOF	indicates sender has restarted payload
+;   CE *	anything else: XOR with $20 to recover origional data
+;
+;********************************************************************************
+;
+;Asynchronous Events
+;
+;	a2flRxAvail()					;Signal to indicate that a byte has been received
+;	a2flTxEmpty()					;Signal to indicate that the last byte has finished transmitting
+;
+;Interface
+;
+;	fl2plRxData(w=Data)				;Data byte from frame
+;	fl2plRxValid()					;Payload data is complete and valid
+;	fl2plRxError()					;Payload data contains errors
+;	pl2flRxIgnore() call				;Return to idle state thus terminating any frame being received
+;
+;	pl2flTxStart()					;Request from payload layer to send a frame - Does not test for media busy
+;	fl2plTxData(ret w=Data ret z=Last) call		;Request data from payload layer - Z flag is set if its the last byte
+;	fl2plTxComplete()				;Inform payload layer that the transmission is complete
+;
+;Notes
+; - The Rx code does not time out but is reset by calling RxIgnore, by receiving a new frame, or by transmitting a frame
+; - If a frame is transmitted (TxStart) while a frame is being recieved the RxCode will reset to the idle state
+;   without indicating an error (RxError).
+;
+;********************************************************************************
+			ENDM
+
+
+FrameDataSeg		MACRO
+;********************************************************************************
+;  FRAMING LAYER
+;********************************************************************************
+
+		org	$38
+
+flBank		= 	$38			;8 bytes used - Note bank shared with Uart
+
+flState		ds	1			;flBank - current state
+flData		ds	1			;flBank - storage for a byte received
+flPosition	ds	1			;flBank - Counter used to count the FF codes at start of frame and to keep track of buffer
+flBuffer	ds	2			;flBank - 2 byte buffer to delay the passing of payload data to allow the removal of the FCS
+flFFCount	ds	1			;flBank - number of FFs to send at the start of each packet
+flFCSl		ds	1			;flBank - 16-bit FCS value (low byte)
+flFCSh		ds	1			;flBank - 16-bit FCS value (high byte)
+
+flRxState		= %00000000
+flTxState		= %10000000
+
+flRxBeginState		= 1 + flRxState		;waiting for start of payload
+flRxPayloadState	= 2 + flRxState		;receiving payload data
+flRxCtrlState		= 3 + flRxState		;waiting for byte after CE code
+
+flTxBeginState		= 1 + flTxState		;sending initial FF bytes
+flTxCtrlState		= 2 + flTxState		;waiting to send an encoded payload data byte
+flTxPayloadState	= 3 + flTxState		;waiting to send another payload byte
+flTxFCSlState		= 4 + flTxState		;waiting to send FCSl
+flTxFCShState		= 5 + flTxState		;waiting to send FCSh
+flTxSendEndState	= 6 + flTxState		;waiting to send EOF to close frame
+flTxWaitEndState	= 7 + flTxState		;waiting for EOF to finish begin sent
+
+BOF			= $C0	; = %11000000	;Beginning of Frame code (refer IrLAP specification)
+EOF			= $C1	; = %11000001	;End of Frame code (refer IrLAP specification)
+CE			= $7D	; = %01111101	;Control Escape code (refer IrLAP specification)
+
+ValidFCSh		= $F0
+ValidFCSl		= $B8
+
+;********************************************************************************
+			ENDM
+
+
+FrameCodeSeg		MACRO
+;********************************************************************************
+;  FRAMING LAYER
+;********************************************************************************
+
+;********** a2flReset **********
+
+a2flReset
+	bank	IsrBank
+	mov	IrdaSpeed, #Irda9600		;IrDA UART speed = 9600
+	bank	flBank
+	clr	flState				;Reset to idle state
+	mov	flFFCount, #10			;Default to 10 FFs @ 9600 = 10.42ms
+	retp
+
+;********** a2flRxAvail **********
+
+a2flRxAvail					;The IrdaRxAvail flag was set
+	bank	IsrBank
+	mov	w, IrdaData			;Get received byte
+	clrb	IrdaRxAvail			;Clear flag
+	bank	flBank
+	snb	flState.7			;Current state = receiving or idle ?
+	retp					;No => ignore (do not need to inform lap layer of media busy as in transmit mode)
+	mov	flData, w			;Store byte that was received
+	debug	PhysicalDataRx			;Debug: pass data received
+	pcall	fl2lapMediaBusy			;Inform lap layer of media busy
+	bank	flBank
+	mov	w, flState			;Jump based on state
+	jmp	PC+w
+	jmp	flRxIdle			; 0 = Idle
+	jmp	flRxBegin			; 1 = flRxBeginState
+	jmp	flRxPayload			; 2 = flRxPayloadState
+	jmp	flRxCtrl			; 3 = flRxCtrlState
+
+;********** a2flTxEmpty **********
+
+a2flTxEmpty					;From physical layer: Last byte has finished transmitting
+	bank	IsrBank
+	clrb	IrdaTxEmpty			;Clear flag
+	bank	flBank
+	sb	flState.7			;Check that it is a TxState
+	retp					;Rx state or idle => return
+	mov	w, flState			;Jump based on state
+	and	w, #%01111111			;Remove Tx state flag
+	jmp	PC+w
+	retp					; 0 = Invalid state
+	jmp	flTxBegin			; 1 = flTxBeginState
+	jmp	flTxCtrl			; 2 = flTxCtrlState
+	jmp	flTxPayload			; 3 = flTxPayloadState
+	jmp	flTxFCSl			; 4 = flTxFCSlState
+	jmp	flTxFCSh			; 5 = flTxFCShState
+	jmp	flTxSendEnd			; 6 = flTxSendEndState
+	jmp	flTxWaitEnd			; 7 = flTxWaitEndState
+
+;********** pl2flRxIgnore **********
+
+pl2flRxIgnore
+	bank	flBank
+	clr	flState				;Reset to idle state
+	retp
+
+;********************************************************************************
+;  FRAMING LAYER - FCS Subroutines
+;********************************************************************************
+
+;********** FCS Subroutines **********
+
+flFCSa		=	Temp			;Global - Tempory varable used in the FCS calculation
+
+flFCSInit
+	mov	w, #$ff				;Init FCS to $FFFF
+	mov	flFCSh, w			;Init FCS to $FFFF
+	mov	flFCSl, w			;Init FCS to $FFFF
+	retp
+
+flFCSData					;Add data to FCS (w = Data) (must be in flBank)
+	xor	flFCSl, w			;FCSl[=X] = FCSl xor w
+	mov	w,<>flFCSl			;w = FCSl[32107654]
+	and	w,#%11110000			;w = FCSl[3210oooo]
+	xor	flFCSl, w			;FCSl = FCSl xor (FCSl shl 4)
+						;Calculate A = FCSh
+	mov	w, <>flFCSl			;w = FCSl[32107654]
+	mov	flFCSa, w			;A = FCSl[32107654]
+	mov	w, >>flFCSa			;w = FCSl[x3210765]
+	and	w, #%00000111			;w = FCSl[ooooo765]
+	xor	w, flFCSl			;w = FCSl xor (FCSl shr 5)
+	mov	flFCSa, w			;store w into A = new FCSh value
+						;Calculate new FCSl value
+	rl	flFCSl				;
+	rl	flFCSl				;
+	mov	w, <<flFCSl			;w = FCSl[43210xxx]
+	and	w, #%11111000			;w = FCSl[43210ooo]
+	xor	w, flFCSh			;w = (FCSl shl 3) xor FCSh
+	mov	flFCSl, w			;Store w into FCSl
+	mov	w, <>flFCSa			;w = A[32107654]
+	and	w, #%00001111			;w = A[oooo7654]
+	xor	flFCSl, w			;FCSl = (FCSl shl 3) xor FCSh xor (A shr 4)
+						;Store new FCSh value
+	mov	w, flFCSa			;A holds FCSh value
+	mov	flFCSh, w			;Store A in FCSh
+	retp
+
+;********************************************************************************
+;  FRAMING LAYER - Receive
+;********************************************************************************
+
+flRxPassData					;Adds data (flRxData) to FCS and passes data to payload layer
+	mov	w, flData			;Last byte that was received
+	call	flFCSData			;Add Data to FCS value
+	mov	Temp, flBuffer+1		;Shift data out of buffer
+	mov	flBuffer+1, flBuffer+0		;Shift data in buffer
+	mov	flBuffer+0, flData		;Shift new data into buffer
+	incsz	flPosition			;Inc position, Zero ?
+	retp					;No  => buffer is not full, return
+	dec	flPosition			;Set position to FF to indicate buffer is still full
+	mov	w, Temp				;Data to pass
+	pjmp	fl2plRxData			;pass data to payload layer (payload layer issues retp instruction)
+
+;********** a2flRxAvail - Idle State **********
+
+flRxIdle					;Waiting for a BOF to indicate start of frame
+	csne	flData, #BOF			;Was byte a BOF ?
+	inc	flState				;Yes => BOF received indicating start of frame => change to flRxBeginState
+	retp
+
+;********** a2flRxAvail - Begin State **********
+
+flRxBegin					;Waiting for non BOF to indicate start of data
+	csne	flData, #BOF			;Was byte a BOF ?
+	retp					;Yes => ignore
+	csne	flData, #EOF			;Was byte a EOF indicating sender has terminated frame ?
+	jmp	:Idle				;Yes => return to idle state
+	csne	flData, #CE			;Was byte a CE indicating a transparency issue ?
+	jmp	:Ctrl				;Yes => change to Ctrl state
+	mov	flState, #flRxPayloadState	;Must be data => Payload state
+	call	flFCSInit			;Init FCS
+	mov	flPosition, #-3			;Init buffer position
+	jmp	flRxPassData			;pass data to payload layer (payload layer issues ret instruction)
+:Idle	clr	flState				;EOF indicating sender has terminated frame => return to idle state
+	retp
+:Ctrl	mov	flState, #flRxCtrlState		;CE indicating transparency issue => change to Ctrl state
+	retp
+
+;********** a2flRxAvail - Payload State **********
+
+flRxPayload					;Currently receiving payload
+	csne	flData, #BOF			;Was byte a BOF indicating sender has terminated the payload and started again ?
+	jmp	:Begin				;Yes => terminate payload and goto Begin state
+	csne	flData, #EOF			;Was byte an EOF indicating the frame/payload is complete ?
+	jmp	:Idle				;Yes => signal complete payload and retpurn to idle state
+	csne	flData, #CE			;Was byte a CE indicating a transparency issue ?
+	jmp	:Ctrl				;Yes => change to Ctrl state
+	jmp	flRxPassData			;pass data to payload layer (payload layer issues retp instruction)
+:Begin	mov	flState, #flRxBeginState	;premature BOF => indicate payload reset to payload layer and retpurn to RxBegin State
+	pjmp	fl2plRxError			;indicate error to payload layer (payload layer issues retp instruction)
+:Idle	clr	flState				;EOF => end of frame reached => inform payload layer and retpurn to idle state
+	cse	flFCSh, #ValidFCSh		;valid FCS (high) ?
+	pjmp	fl2plRxError			;No => indicate reset to payload layer (payload layer issues retp instruction)
+	cse	flFCSl, #ValidFCSl		;valid FCS (low) ?
+	pjmp	fl2plRxError			;No => indicate reset to payload layer (payload layer issues retp instruction)
+	pjmp	fl2plRxValid			;FCS valid => indicate complete to payload layer (payload layer issues retp instruction)
+:Ctrl	mov	flState, #flRxCtrlState
+	retp
+
+;********** a2flRxAvail - Ctrl State **********
+
+flRxCtrl					;CE has been encountered, need to check next character
+	csne	flData, #BOF			;Was byte BOF indicating sender has terminated payload and started again ?
+	jmp	:Begin				;Yes => restart at Begin state (Note payload layer has been passed data => must inform payload layer of reset)
+	csne	flData, #EOF			;Was byte EOF indicating sender has terminated frame ?
+	jmp	:Idle				;Yes => retpurn to idle (Note: payload layer has been passed any data => must inform payload layer of reset)
+	mov	flState, #flRxPayloadState	;Must be data => pass data to payload layer and retpurn to payload state
+	xor	flData, #$20			;Recover data
+	jmp	flRxPassData			;pass data to payload layer (payload layer issues retp instruction)
+:Begin	mov	flState, #flRxBeginState	;BOF => sender has terminated payload and started again => retpurn to begin state
+	pjmp	fl2plRxError			;indicate error to payload layer (payload layer issues retp instruction)
+:Idle	clr	flState				;EOF => sender has terminated frame => retpurn to idle state
+	pjmp	fl2plRxError			;indicate error to payload layer (payload layer issues retp instruction)
+
+;********************************************************************************
+;  FRAMING LAYER - Transmit
+;********************************************************************************
+
+flTxSendData					;Send byte (w) now (doesn't check for busy)
+	bank	IsrBank
+	mov	IrdaData, w			;Byte to send
+	setb	IrdaTxStart			;Send byte
+	debug	PhysicalDataTx			;Debug: pass data being transmitted
+	retp					;WARNING - not in flBank
+
+;********** pl2flTxFrame **********
+
+pl2flTxFrame					;Request to start a new frame
+	bank	flBank
+	mov	flState, #flTxBeginState	;Next state = begin
+	mov	flPosition, flFFCount		;Counter = FFCount
+	mov	w, #$FF
+	jmp	flTxSendData			;Send FF (flTxSendData issues ret instruction)
+
+;********** a2flTxEmpty - Begin State **********
+
+flTxBegin					;Sending prefex FF bytes
+	dec	flPosition			;Decrement counter
+	snz					;Zero ?
+	jmp	:BOF				;Yes => send BOF and set next state to send payload data
+	mov	w, #$FF				;No  => Send another FF
+	jmp	flTxSendData			;(TxSendData issues ret instruction)
+:BOF	mov	flState, #flTxPayloadState	;Will enter flTxPayload state after BOF has been sent
+	call	flFCSInit			;Init FCS
+	mov	w, #BOF				;Send BOF
+	jmp	flTxSendData
+
+;********** a2flTxEmpty - Send States **********
+
+flTxPayload
+	pcall	fl2plTxData			;Get data from payload layer
+	bank	flBank
+	snz					;Is this the last byte ? (Z set)
+	inc	flState				;Yes => Next State = FCSl
+	mov	flData, w			;Store data
+	debug	PayloadDataTx			;Debug: pass payload data being transmitted
+	call	flFCSData			;w = flData - Add data to FCS
+	jmp	flTxSend			;Check for control code and send
+
+flTxFCSl
+	mov	w, /flFCSl			;Next data to send = FCSl
+	mov	flData, w			;Store in TxData
+	inc	flState				;Next State = FCSh
+	jmp	flTxSend			;Check for control code and send
+
+flTxFCSh
+	mov	w, /flFCSh			;Next data to send = FCSh
+	mov	flData, w			;Store in TxData
+	inc	flState				;Next State = End
+	jmp	flTxSend			;Check for control code and send
+
+flTxSend					;Send payload byte
+	csne	flData, #BOF			;Is byte a control code ?
+	jmp	:Ctrl				;Yes => transparency issue
+	csne	flData, #EOF			;Is byte a control code ?
+	jmp	:Ctrl				;Yes => transparency issue
+	csne	flData, #CE			;Is byte a control code ?
+	jmp	:Ctrl				;Yes => transparency issue
+	mov	w, flData			;Yes => transmit data
+	jmp	flTxSendData			;Send byte
+:Ctrl	mov	flPosition, flState		;Store current state in position variable
+	mov	flState, #flTxCtrlState		;Next state = TxCtrlState
+	mov	w, #CE
+	jmp	flTxSendData			;Send CE code (TxSendData issues ret instruction)
+
+flTxCtrl
+	mov	flState, flPosition		;Recover old state from position variable
+	mov	w, flData
+	xor	w, #$20				;Encode data
+	jmp	flTxSendData
+
+;********** a2flTxEmpty - SendEnd State **********
+
+flTxSendEnd					;FCS finished => send EOF to close frame
+	inc	flState				;Next state = flTxWaitEnd state
+	mov	w, #EOF
+	jmp	flTxSendData			;Send EOF (TxSendData issues ret instruction)
+
+;********** a2flTxEmpty - WaitEnd State **********
+
+flTxWaitEnd					;Frame finished and now last byte has finished sending
+	clr	flState				;Return to idle state
+	pjmp	fl2plTxComplete			;Inform payload layer that the transmission is complete (payload layer issues retp instruction)
+
+;********************************************************************************
+		ENDM

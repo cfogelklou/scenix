@@ -1,0 +1,989 @@
+;*****************************************************************************************
+; Copyright © [01/26/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+; 
+; Filename:	SX52_timers.src
+;
+; Authors:	Stephen Holland
+;		Sr. Applications Engineer
+;		Scenix Semiconductor
+;
+; Revision:	1.00
+;
+; Part:		SX52BD datecode AA9931AC
+; Freq:		50Mhz
+; Compiler:	Parallax SX-Key52 software v1.12 and SASM 1.40
+;
+; Date Written: 10/16/99
+;
+; Last Revised: 10/31/99
+;
+; Program Description:
+;
+;	This code demonstrates the various modes of the SX48BD and SX52BD onboard 16-bit
+;	timers.
+;
+; Revision History:
+;	10/31/99 - Added timer capture functions set_CP1 and set_CP2 (each function monitors
+;		   both capture sources on the timer).
+;
+;*****************************************************************************************
+
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX48BD/ES, SX48BD, SX52BD/ES or SX52BD.
+; For SX48BD/ES and SX52BD/ES, uncomment both defines, SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+SX48_52
+;SX48_52_ES
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+;SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52				;SX48/52/BD device directives for SX-Key
+		device	oschs2
+    ENDIF
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs2   
+    ENDIF
+  ENDIF
+ENDIF
+		id	'  '			;
+		reset	reset_entry		; set reset vector
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+_bank	macro	1
+  noexpand
+	bank	\1
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+  expand
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+  noexpand
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+  expand
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+  noexpand
+	    ELSE
+  expand
+		clrb	fsr.7
+  noexpand
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+  noexpand
+	IFDEF SX48_52
+  expand
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+  noexpand
+	ELSE
+  expand
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+  noexpand
+	ENDIF
+	endm
+
+IFDEF SX_Key
+;*****************************************************************************************
+; Debugger Watches (SX-Key software only)
+;*****************************************************************************************
+	watch	T1cap1_done,1,ubin
+	watch	T1CAP1L,16,uhex
+	watch	T1cap2_done,1,ubin
+	watch	T1CAP2L,16,uhex
+	watch	T2cap1_done,1,ubin
+	watch	T2CAP1L,16,uhex
+	watch	T2cap2_done,1,ubin
+	watch	T2CAP2L,16,uhex
+
+ENDIF
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+		org     global_org
+
+function_temp	equ	global_org
+global_temp	equ	global_org+1
+flags		equ	global_org+2	;program flags register
+	timer_flag	equ	flags.0	;indicates a timeout on the software 16-bit timer
+	T1cap1_done	equ	flags.1 ;indicates T1 capture 1 done
+	T1cap2_done	equ	flags.2 ;indicates T1 capture 2 done
+	T2cap1_done	equ	flags.3 ;indicates T2 capture 1 done
+	T2cap2_done	equ	flags.4 ;indicates T2 capture 2 done
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+bank0		=	$
+
+
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+bank1		=	$
+timers		=	$
+
+t1_hdc_high	ds	1		;T1R1CMH value
+t1_hdc_low	ds	1		;T1R1CML value
+t1_ldc_high	ds	1		;T1R2CMH value
+t1_ldc_low	ds	1		;T1R2CML value
+t2_hdc_high	ds	1		;T2R1CMH value
+t2_hdc_low	ds	1		;T2R1CML value
+t2_ldc_high	ds	1		;T2R2CMH value
+t2_ldc_low	ds	1		;T2R2CML value
+T1CAP1L		ds	1		;T1 capture 1 low byte
+T1CAP1H		ds	1		;T1 capture 1 high byte
+T1CAP2L		ds	1		;T1 capture 2 low byte
+T1CAP2H		ds	1		;T1 capture 2 high byte
+T2CAP1L		ds	1		;T2 capture 1 low byte
+T2CAP1H		ds	1		;T2 capture 1 high byte
+T2CAP2L		ds	1		;T2 capture 2 low byte
+T2CAP2H		ds	1		;T2 capture 2 high byte
+
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+timer_vp	=	$
+
+timer_low	ds	1		;timer accumulator low byte
+timer_high	ds	1		;timer accumulator high byte
+
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+bank3		=	$
+
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+
+bank4		=	$
+
+
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+
+bank5		=	$
+
+
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+
+bank6		=	$
+
+
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+
+bank7		=	$
+
+
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+
+bank8		=	$
+
+
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+
+bank9		=	$
+
+
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+
+bankA		=	$
+
+
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+
+bankB		=	$
+
+
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+
+bankC		=	$
+
+
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+
+bankD		=	$
+
+
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+
+bankE		=	$
+
+
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+
+bankF		=	$
+
+
+;*****************************************************************************************
+; Port Assignment
+;*****************************************************************************************
+RA_latch	equ	%00000000		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11111111		;SX18/20/28/48/52 port A DDIR value
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%11111111		;SX18/20/28/48/52 port A PLP value
+
+RB_latch	equ	%00000000		;SX18/20/28/48/52 port B latch init
+RB_DDIR		equ	%10111111		;SX18/20/28/48/52 port B DDIR value
+RB_ST		equ	%11111111		;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111		;SX18/20/28/48/52 port B PLP value
+
+RC_latch	equ	%00000000		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%11111011		;SX18/20/28/48/52 port C DDIR value
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+		
+RD_latch	equ	%00000000		;SX48/52 port D latch init
+RD_DDIR		equ	%11111111		;SX48/52 port D DDIR value
+RD_ST		equ	%11111111		;SX48/52 port D ST value
+RD_LVL		equ	%00000000		;SX48/52 port D LVL value
+RD_PLP		equ	%11111111		;SX48/52 port D PLP value
+
+RE_latch	equ	%00000000		;SX48/52 port E latch init
+RE_DDIR		equ	%01111111		;SX48/52 port E DDIR value
+RE_ST		equ	%11111111		;SX48/52 port E ST value
+RE_LVL		equ	%00000000		;SX48/52 port E LVL value
+RE_PLP		equ	%11111111		;SX48/52 port E PLP value
+
+;*****************************************************************************************
+; Pin Definitions
+;*****************************************************************************************
+
+timer_pin	equ	re.7		;flashing timer LED
+
+;*****************************************************************************************
+; Program constants
+;*****************************************************************************************
+
+int_period	=	217			;RTCC Interrupt rate
+						; = 1/(int_period*RTCC prescaler*1/50MHz)
+						; = 1/(217*1*20ns) = 4.34us
+
+	;*********************************************************************************
+	; SX48BD/52BD Mode addresses
+	; *On SX48BD/52BD, most registers addressed via mode are read and write, with the
+	; exception of CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Timer (read) addresses
+TCPL_R		equ	$00		;Read Timer Capture register low byte
+TCPH_R		equ	$01		;Read Timer Capture register high byte
+TR2CML_R	equ	$02		;Read Timer R2 low byte
+TR2CMH_R	equ	$03		;Read Timer R2 high byte
+TR1CML_R	equ	$04		;Read Timer R1 low byte
+TR1CMH_R	equ	$05 		;Read Timer R1 high byte
+TCNTB_R		equ	$06		;Read Timer control register B
+TCNTA_R		equ	$07		;Read Timer control register A
+
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_R		equ	$0A		;Read MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_R		equ	$0B		;Read MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_R		equ	$0C		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_R		equ	$0D		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_R		equ	$0E		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_R		equ	$0F		;Read Port Direction
+
+; Timer (write) addresses
+CLR_TMR		equ	$10		;Resets 16-bit Timer
+TR2CML_W	equ	$12		;Write Timer R2 low byte
+TR2CMH_W	equ	$13		;Write Timer R2 high byte
+TR1CML_W	equ	$14		;Write Timer R1 low byte
+TR1CMH_W	equ	$15 		;Write Timer R1 high byte
+TCNTB_W		equ	$16		;Write Timer control register B
+TCNTA_W		equ	$17		;Write Timer control register A
+
+; Port setup (write) addresses
+WKED_W		equ	$1A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$1B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$1C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$1D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$1E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$1F		;Write Port Direction
+
+;*****************************************************************************************
+; Interrupt Service Routine
+;*****************************************************************************************
+; Note: The interrupt code must always originate at address $0.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; With a retiw value of -217 and an oscillator frequency of 50MHz, this
+; code runs every 4.34us.
+;*****************************************************************************************
+		org     $0
+interrupt					;3
+
+	;*********************************************************************************
+	; Virtual Peripheral: 16-bit Timer 
+	;
+	;
+	;       Input variable(s): 
+	;       Output variable(s): 
+	;       Variable(s) affected: 
+	;       Flag(s) affected: 
+	;*********************************************************************************
+:16bit_timer	_bank	timer_vp
+		inc	timer_low		;adjust timer's accumulator
+		snz
+		inc	timer_high		; (timer = 16 bits long)        
+		snz
+		setb	timer_flag
+;toggle_led
+		sb	timer_high.6		;toggle timer (square wave)
+		clrb	timer_pin
+		snb	timer_high.6
+		setb	timer_pin
+
+	;*********************************************************************************
+	; Set Interrupt Rate
+	;*********************************************************************************
+isr_end		mov	w,#-int_period		;refresh RTCC on return
+		retiw				;return from the interrupt
+						; = 1/(int_period*RTCC prescaler*1/50MHz)
+						; = 1/(217*1*20ns) = 4.34us
+;*****************************************************************************************
+; End of the Interrupt Service Routine
+;*****************************************************************************************
+
+;*****************************************************************************************
+; RESET VECTOR 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Program execution begins here on power-up or after a reset
+	;*********************************************************************************
+reset_entry		
+	;*********************************************************************************
+	; Initialise all port configuration
+	;*********************************************************************************
+
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+		mov     w,#RD_ST            	;Setup RD Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_ST            	;Setup RE Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!re,w		
+
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+		mov     w,#RD_LVL            	;Setup RD CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rd,w		
+		mov     w,#RE_LVL            	;Setup RE CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!re,w		
+
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+		mov     w,#RD_PLP            	;Setup RD Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_PLP            	;Setup RE Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!re,w		
+
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+		mov	w,#RD_DDIR		;Setup RD Direction register, 0 = output, 1 = input
+		mov	!rd,w			
+		mov	w,#RE_DDIR		;Setup RE Direction register, 0 = output, 1 = input
+		mov	!re,w			
+
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+		mov     w,#RD_latch         	;Initialize RD data latch
+		mov     rd,w			
+		mov     w,#RE_latch         	;Initialize RE data latch
+		mov     re,w			
+
+	;*********************************************************************************
+	; Clear all Data RAM locations
+	;*********************************************************************************
+						;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zero_ram	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+
+		_bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+	;*********************************************************************************
+	; Initialize program/VP registers
+	;*********************************************************************************
+
+
+	;*********************************************************************************
+	; Setup and enable RTCC interrupt, WREG register, RTCC/WDT prescaler
+	;*********************************************************************************
+
+RTCC_ON		=	%10000000	;Enables RTCC at address $01 (RTW hi)
+					;*WREG at address $01 (RTW lo) by default
+RTCC_ID		=	%01000000	;Disables RTCC edge interrupt (RTE_IE hi)
+					;*RTCC edge interrupt (RTE_IE lo) enabled by default
+RTCC_INC_EXT	=	%00100000	;Sets RTCC increment on RTCC pin transition (RTS hi)
+					;*RTCC increment on internal instruction (RTS lo) is default
+RTCC_FE		=	%00010000	;Sets RTCC to increment on falling edge (RTE_ES hi)
+					;*RTCC to increment on rising edge (RTE_ES lo) is default
+RTCC_PS_ON	=	%00000000	;Assigns prescaler to RTCC (PSA lo)
+RTCC_PS_OFF	=	%00001000	;Assigns prescaler to RTCC (PSA lo)
+PS_000		=	%00000000	;RTCC = 1:2, WDT = 1:1
+PS_001		=	%00000001	;RTCC = 1:4, WDT = 1:2
+PS_010		=	%00000010	;RTCC = 1:8, WDT = 1:4
+PS_011		=	%00000011	;RTCC = 1:16, WDT = 1:8
+PS_100		=	%00000100	;RTCC = 1:32, WDT = 1:16
+PS_101		=	%00000101	;RTCC = 1:64, WDT = 1:32
+PS_110		=	%00000110	;RTCC = 1:128, WDT = 1:64
+PS_111		=	%00000111	;RTCC = 1:256, WDT = 1:128
+
+		mov	w,#RTCC_PS_OFF	;setup option register
+		mov	!option,w
+		jmp	@main
+
+org	$200
+;*****************************************************************************************
+; Jump table for page 1
+; Enables CALLs to functions in the second half of the page 
+;*****************************************************************************************
+set_PWM1	jmp	set_PWM1_
+set_PWM2	jmp	set_PWM2_
+set_CP1		jmp	set_CP1_
+set_CP2		jmp	set_CP2_
+
+;*****************************************************************************************
+; Subroutines
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Function: delay_10n_ms
+	; This subroutine delays 'w'*10 milliseconds (with RTCC of 217 cycles). 
+	; 
+	; Inputs:
+	;	w - # of milliseconds to delay for.
+	; Outputs:
+	; 	none
+	; Registers affected:
+	;	temp, timer_high, timer_low, timer_flag
+	;*********************************************************************************
+delay_10n_ms	mov	function_temp,w
+		_bank	timers
+:loop		clrb	timer_flag		; This loop delays for 10ms
+		mov	timer_high,#$f6
+		mov	timer_low,#$d7
+		jnb	timer_flag,$
+		dec	function_temp		; do it w-1 times.
+		jnz	:loop	
+		clrb	timer_flag
+		retp
+
+	;*********************************************************************************
+	; Function: set_PWM1
+	; Sets up Multi-function Timer 1 in PWM mode. The registers t1_hdc_high and
+	; t1_hdc_low set up the 16-bit high duty cycle value, and t1_ldc_high and t1_ldc_low
+	; setup the 16-bit low duty cycle value
+	;
+	; Inputs: t1_hdc_high, t1_hdc_low, t1_ldc_high, t1_ldc_low
+	;	
+	; Outputs:
+	;	
+	; Registers affected:
+	;
+	; Functions Called:
+	; 	none
+	;*********************************************************************************
+set_PWM1_	_mode	CLR_TMR		;clear Timer T1
+		mov	w,#$00
+		mov	!rb,w
+		;*************************************************************************
+		; Setup T1 control registers
+		; -PWM mode, prescaler=1:1
+		;*************************************************************************
+		_mode	TCNTA_W		;write to T1CNTA
+		mov	w,#$00
+		mov	!rb,w
+
+		_mode	TCNTB_W		;write to T1CNTB
+		mov	w,#$01
+		mov	!rb,w
+		;*************************************************************************
+		; Setup high duty-cycle via R1(16-bit)
+		;*************************************************************************
+		_mode	TR1CMH_W	;write to T1R1CMH
+		mov	w,t1_hdc_high
+		mov	!rb,w
+
+		_mode	TR1CML_W	;write to T1R1CML
+		mov	w,t1_hdc_low
+		mov	!rb,w
+		;*************************************************************************
+		; Setup low duty-cycle via R2(16-bit)
+		;*************************************************************************
+		_mode	TR2CMH_W	;write to T1R2CMH
+		mov	w,t1_ldc_high
+		mov	!rb,w
+
+		_mode	TR2CML_W	;write to T1R2CML
+		mov	w,t1_ldc_low
+		mov	!rb,w
+		retp
+
+	;*********************************************************************************
+	; Function: set_PWM2
+	; Sets up Multi-function Timer 2 in PWM mode.
+	; 
+	; Inputs: t2_hdc_high, t2_hdc_low, t2_ldc_high, t2_ldc_low
+	;	
+	; Outputs:
+	;	
+	; Registers affected:
+	;
+	; Functions Called:
+	; 	none
+	;*********************************************************************************
+set_PWM2_	_mode	CLR_TMR		;clear Timer T2
+		mov	w,#$00
+		mov	!rc,w
+		;*************************************************************************
+		; Setup T2 control registers
+		; -PWM mode, prescaler=1:1
+		;*************************************************************************
+		_mode	TCNTA_W		;write to T2CNTA
+		mov	w,#$00
+		mov	!rc,w
+
+		_mode	TCNTB_W		;write to T2CNTB
+		mov	w,#$01
+		mov	!rc,w
+		;*************************************************************************
+		; Setup high duty-cycle via R1(16-bit)
+		;*************************************************************************
+		_mode	TR1CMH_W	;write to T2R1CMH
+		mov	w,t2_hdc_high
+		mov	!rc,w
+
+		_mode	TR1CML_W	;write to T2R1CML
+		mov	w,t2_hdc_low
+		mov	!rc,w
+		;*************************************************************************
+		; Setup low duty-cycle via R2(16-bit)
+		;*************************************************************************
+		_mode	TR2CMH_W	;write to T2R2CMH
+		mov	w,t2_ldc_high
+		mov	!rc,w
+
+		_mode	TR2CML_W	;write to T2R2CML
+		mov	w,t2_ldc_low
+		mov	!rc,w
+		retp
+
+	;*********************************************************************************
+	; Function: set_CP1
+	; Sets up Multi-function Timer 1 in Capture mode. A valid transition on the
+	; capture 1 pin captures the counter value into the dedicated capture registers
+	; (16-bit), T1CPL and T1CPH. A valid transition on the capture 2 pin captures
+	; the counter value into the R2 registers (16-bit), T1R2CML and T1R2CMH.
+	;
+	; Inputs: none
+	;	
+	; Outputs: T1CPL, T1CPH, T1R2CML and T1R2CMH
+	;	
+	; Registers affected:
+	;
+	;*********************************************************************************
+set_CP1_	_mode	CLR_TMR		;clear Timer T1
+		mov	w,#$00
+		mov	!rb,w
+		;*************************************************************************
+		; Setup T1 control registers
+		; -Capture mode, prescaler=1:1
+		;*************************************************************************
+		_mode	TCNTB_W		;write to T1CNTB
+		mov	w,#%01000010	;setup capture edge (T1CNTB.6), 
+		mov	!rb,w		;setup capture clock prescaler T1PS2:0 (T1CNTB.4:2) and
+					;enable Capture/Compare mode (T1CNTA.1:0 = 10b)
+
+		_mode	TCNTA_W		;write to T1CNTA
+		mov	w,#%00000000	;setup capture interrupt (T1CNTA.5) and 
+		mov	!rb,w		;disable compare interrupt (T1CNTA.2)
+
+		;*************************************************************************
+		; Wait for Capture flag 1, T1CPF1 (T1CNTA.6)
+		;*************************************************************************
+:again		snb	T1cap1_done
+		jmp	:cap2
+		_mode	TCNTA_R		;read from T1CNTA
+		mov	!rb,w
+		mov	function_temp,w
+		sb	function_temp.6 ;check bit 6 (T1CPF1)
+		jmp	:cap2
+
+		setb	T1cap1_done	;T1 Capture 1 done, get 16-bit result
+		_mode	TCPL_R		;read from T1CPL
+		mov	!rb,w		;get T1CPL and,
+		_bank	timers
+		mov	T1CAP1L,w	;write it to T1CAP1L
+		_mode	TCPH_R		;read from T1CPH
+		mov	!rb,w		;get T1CPH and,
+		mov	T1CAP1H,w	;write it to T1CAP1H
+		;*************************************************************************
+		; Wait for Capture flag 2, T1CPF2 (T1CNTA.7)
+		;*************************************************************************
+:cap2		snb	T1cap2_done
+		jmp	:again
+		_mode	TCNTA_R		;read from T1CNTA
+		mov	!rb,w
+		mov	function_temp,w
+		sb	function_temp.7 ;check bit 7 (T1CPF2)
+		jmp	:again
+
+		setb	T1cap2_done	;T1 Capture 2 done, get 16-bit result
+		_mode	TR2CML_R	;read from T1R2CML
+		mov	!rb,w		;get T1R2CML and,
+		_bank	timers
+		mov	T1CAP2L,w	;write it to T1CAP2L
+		_mode	TR2CMH_R	;read from T1R2CMH
+		mov	!rb,w		;get T1R2CMH and,
+		mov	T1CAP2H,w	;write it to T1CAP2H
+
+		retp
+
+	;*********************************************************************************
+	; Function: set_CP2
+	; Sets up Multi-function Timer 2 in Capture mode. A valid transition on the
+	; capture 1 pin captures the counter value into the dedicated capture registers
+	; (16-bit), T2CPL and T2CPH. A valid transition on the capture 2 pin captures
+	; the counter value into the R2 registers (16-bit), T2R2CML and T2R2CMH.
+	;
+	; Inputs: none
+	;	
+	; Outputs: T1CPL, T1CPH, T1R2CML and T1R2CMH
+	;	
+	; Registers affected:
+	;
+	;*********************************************************************************
+set_CP2_	_mode	CLR_TMR		;clear Timer T2
+		mov	w,#$00
+		mov	!rc,w
+		;*************************************************************************
+		; Setup T2 control registers
+		; -Capture mode, prescaler=1:1
+		;*************************************************************************
+		_mode	TCNTB_W		;write to T2CNTB
+		mov	w,#%01000010	;setup capture edge (T2CNTB.6), 
+		mov	!rc,w		;setup capture clock prescaler T2PS2:0 (T2CNTB.4:2) and
+					;enable Capture/Compare mode (T2CNTA.1:0 = 10b)
+
+		_mode	TCNTA_W		;write to T2CNTA
+		mov	w,#%00000000	;setup capture interrupt (T2CNTA.5) and 
+		mov	!rc,w		;disable compare interrupt (T2CNTA.2)
+
+		;*************************************************************************
+		; Wait for Capture flag 1, T2CPF1 (T2CNTA.6)
+		;*************************************************************************
+:again		snb	T2cap1_done
+		jmp	:cap2
+		_mode	TCNTA_R		;read from T2CNTA
+		mov	!rc,w
+		mov	function_temp,w
+		sb	function_temp.6 ;check bit 6 (T2CPF1)
+		jmp	:cap2
+
+		setb	T2cap1_done	;T2 Capture 1 done, get 16-bit result
+		_mode	TCPL_R		;read from T2CPL
+		mov	!rc,w		;get T2CPL and,
+		_bank	timers
+		mov	T2CAP1L,w	;write it to T2CAP1L
+		_mode	TCPH_R		;read from T2CPH
+		mov	!rc,w		;get T2CPH and,
+		mov	T2CAP1H,w	;write it to T2CAP1H
+		;*************************************************************************
+		; Wait for Capture flag 2, T2CPF2 (T2CNTA.7)
+		;*************************************************************************
+:cap2		snb	T2cap2_done
+		jmp	:again
+		_mode	TCNTA_R		;read from T2CNTA
+		mov	!rc,w
+		mov	function_temp,w
+		sb	function_temp.7 ;check bit 7 (T2CPF2)
+		jmp	:again
+
+		setb	T2cap2_done	;T2 Capture 2 done, get 16-bit result
+		_mode	TR2CML_R	;read from T2R2CML
+		mov	!rc,w		;get T2R2CML and,
+		_bank	timers
+		mov	T2CAP2L,w	;write it to T2CAP2L
+		_mode	TR2CMH_R	;read from T2R2CMH
+		mov	!rc,w		;get T2R2CMH and,
+		mov	T2CAP2H,w	;write it to T2CAP2H
+
+		retp
+
+	org	$A00
+;*****************************************************************************************
+; MAIN PROGRAM CODE 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Main
+	;*********************************************************************************
+main		
+
+
+	;*********************************************************************************
+	; Main Program Loop
+	;*********************************************************************************
+main_loop
+;		jmp	Variable_PWM
+
+		_bank	timers
+		mov	t1_hdc_high,#$20	;load T1R1CMH value
+		mov	t1_hdc_low,#$01		;load T1R1CML value
+		mov	t1_ldc_high,#$20	;load T1R2CMH value
+		mov	t1_ldc_low,#$01		;load T1R2CML value
+		call	@set_PWM1
+
+		call	@set_CP2
+
+		jmp	main_loop
+
+	;*********************************************************************************
+	; Function: Variable_PWM
+	; This function demonstrates how to setup and enable an onboard 16-bit timer in
+	; PWM mode and modulate the PWM output.
+	;*********************************************************************************
+Variable_PWM
+	;*********************************************************************************
+	; Setup and enable onboard 16-bit timers in PWM mode.
+	;*********************************************************************************
+:loop1		_bank	timers
+		mov	t1_hdc_high,#$ff	;load T1R1CMH value
+		mov	t1_hdc_low,#$ff		;load T1R1CML value
+		mov	t1_ldc_high,#$ff	;load T1R2CMH value
+		mov	t1_ldc_low,#$ff		;load T1R2CML value
+		call	@set_PWM1
+
+		mov	w,#10
+		call	@delay_10n_ms
+
+	;*********************************************************************************
+	; Only update PWM on overflow of R2 
+	;*********************************************************************************
+		_mode	TCNTA_W			;write to T1CNTA (to clear the flags)
+		mov	w,#$00
+		mov	!rb,w
+
+		_mode	TCNTA_R			;read T1CNTA (to check T1CMF2)
+:loop2		mov	w,#$00
+		mov	!rb,w
+		sb	wreg.4			;wait until T1CMF2 gets set
+		jmp	:loop2			
+
+	;*********************************************************************************
+	; Reload onboard 16-bit timers with new values.
+	;*********************************************************************************
+		_bank	timers
+		mov	t1_hdc_high,#$7f	;load T1R1CMH value
+		mov	t1_hdc_low,#$ff		;load T1R1CML value
+		mov	t1_ldc_high,#$7f	;load T1R2CMH value
+		mov	t1_ldc_low,#$ff		;load T1R2CML value
+		call	@set_PWM1
+
+		mov	w,#10
+		call	@delay_10n_ms
+
+	;*********************************************************************************
+	; Only update PWM on overflow of R2 
+	;*********************************************************************************
+		_mode	TCNTA_W			;write to T1CNTA (to clear the flags)
+		mov	w,#$00
+		mov	!rb,w
+
+		_mode	TCNTA_R			;read T1CNTA (to check T1CMF2)
+:loop3		mov	w,#$00
+		mov	!rb,w
+		sb	wreg.4			;wait until T1CMF2 gets set
+		jmp	:loop3			
+
+		jmp	:loop1
+
+;*****************************************************************************************
+; END OFMAIN PROGRAM CODE 
+;*****************************************************************************************
+
+
+;*****************************************************************************************
+END		;End of program code
+;*****************************************************************************************

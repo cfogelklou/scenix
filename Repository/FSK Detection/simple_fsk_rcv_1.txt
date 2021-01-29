@@ -1,0 +1,44 @@
+
+
+An FSK Demodulating Virtual Peripheral
+
+
+This document describes the use of a Scenix SX microcontroller to perform FSK, or frequency-shift keying, demodulation.  FSK is an early form of modem communication techniques.  The source code this document describes is called simple_fsk_rcv_1_0.src.
+In the past, such telephony functions as FSK (frequency-shift keying) generation and detection, DTMF (dual-tone, multi-frequency) generation and detection, and Caller ID could not be implemented with an 8-bit embedded MCU because performance levels were not high enough to support them.  As a result, either a custom MCU had to be designed or a 16- or 32-bit device used.  Now, the 8-bit Scenix Semiconductor SX Series MCUs, which have performance reaching 100 MIPS (million instructions per second) and a deterministic interrupt architecture, overcome this roadblock by providing the ability to perform these functions in software.
+Unlike other MCUs that add functions in the form of additional silicon, the SX Series uses its industry-leading performance to execute functions as software modules, or Virtual Peripherals.  These are loaded into a high-speed (10 ns access time) on-chip flash/EEPROM program memory and executed as required.  In addition, a set of on-chip hardware peripherals is available to perform operations that cannot readily be done in software, such as comparators, timers, and oscillators.
+One of the oldest protocols for modem communications is called FSK, or Frequency Shift Keying.  With frequency shift keying, the transmitting modem converts a bitstream (1's or 0's) into a varying frequency which can be easily transmitted over telephone lines.  The receiving modem receives this modulated signal and transforms it back into a bitstream.  In the Scenix solution, the receiving of FSK is done using a very simple zero-cross method.  The simplicity of the algorithm results in a program size of only 67 words!  In addition, the algorithm requires only 2 bytes of RAM and one I/O pin to receive an FSK modulated signal.  The FSK specification described in this document uses 1300Hz to represent a '1' and 2100Hz to represent a '0'.  The maximum data rate for this type of modulation is 1200 baud.
+Although not nearly as common as the newer PSK techniques of modulation, FSK is a simple, inexpensive, easy way to achieve low-speed communications.  Some applications of low-speed FSK are remote sensing equipment, automatic teller machines, and Caller ID.
+
+
+
+
+SOFTWARE DESIGN
+
+The software implementation of FSK detection is very simple.  The transitions on the input pin are timed by the software.  If the transitions happen within a specified time, then a high frequency is being detected, otherwise a low frequency is being detected.  The program sets the RS-232 TX pin high or low, depending on the frequency detected. 
+
+CIRCUIT DESIGN
+
+
+
+Running the demo is a snap with an SX DTMF DEMO board.  Without the demo-board, a simple circuit can be built which will test the FSK detection algorithm
+
+Demonstrating FSK detection requires this type of circuit, in addition to some means of creating the FSK signal.  Integrating this type of solution into an operational modem would require one additional block: the isolation circuitry, which isolates the outside phone line from the modem's internal analog circuitry.  There are standard isolation circuits for every country, so check out which one yours uses.
+
+The input signal into the SX must be clipped because the FSK detection program uses a Schmitt Trigger input.  This allows the SX to reject a larger amount of noise.
+
+
+
+
+
+OPERATION:
+
+
+On reset, the program initializes the necessary registers and proceeds to loop until the RS-232 RX pin is pulled low, which will happen when a character is typed on the local PC.  When this occurs, the program enables interrupts.  Once interrupts are enabled, the FSK detection begins running.  The main program begins an infinite loop, while the interrupt service routine converts the incoming FSK signal into a '1' or '0' on the RS-232 TX pin.  When fed a signal from a transmitting modem at 1200 baud or lower, this algorithm will demodulate the signal back into a bitstream, which can be received by the UART of a local PC.  The demodulated baud rate will match the baud rate of the transmitting modem.  For a means of generating an FSK signal, see the documentation on generating FSK at http://www.scenix.com.
+
+
+FSK Detection Using an SX Microcontroller
+Chris Fogelklou, Scenix Semiconductor, Inc.
+
+
+Copyright (c) 1999 Scenix Semiconductor, Inc. All rights reserved.	1
+

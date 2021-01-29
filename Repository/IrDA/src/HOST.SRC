@@ -1,0 +1,43 @@
+;********************************************************************************
+;  debugl MACRO
+;  Send a Literal out the debug port
+;  Affects : w
+;  Cycles  : 3
+;********************************************************************************
+
+debugl	MACRO	2
+IF	\1 = 1
+	mov	w, #\2
+	mov	DebugData, w
+	setb	DebugSend
+ENDIF
+	ENDM
+
+;********************************************************************************
+;  debugf MACRO
+;  Send a Register out the debug port
+;  Affects : w, Z
+;  Cycles  : 3
+;********************************************************************************
+
+debugf	MACRO	2
+IF	\1 = 1
+	mov	w,\2
+	mov	DebugData, w
+	setb	DebugSend
+ENDIF
+	ENDM
+
+;********************************************************************************
+;  debug MACRO
+;  Send w out the debug port
+;  Affects : None
+;  Cycles  : 2
+;********************************************************************************
+
+debug	MACRO	1
+IF	\1 = 1
+	mov	DebugData, w
+	setb	DebugSend
+ENDIF
+	ENDM

@@ -1,0 +1,2289 @@
+; PPP - UDP code
+;
+; Copyright 1999 Celsius Research Ltd
+;
+;
+
+; Device Information
+		device	pins28,pages4,banks8,oschs
+		device	turbo,stackx,optionx
+		id	'PPP'
+		reset	ResetVector
+		FREQ	50000000
+
+DEBUG		=	0	; Set to 1 to enable the debugging information.
+
+WIN95		=	1	; Set to 1 if the host is a Windows 95 computer.
+
+;===============================================================================
+; Macros
+;===============================================================================
+
+IF DEBUG = 1
+	DEBUGB	MACRO			; Write W as a hex number.
+		call	@DebugSendHex
+		bank	PPPVars
+	ENDM
+
+	DEBUGS	MACRO	1		; Write a string to the output.
+		mov	w,#\1
+		call	@DebugSendString
+		bank	PPPVars
+	ENDM
+
+	DEBUGEVENT	MACRO		; Write a message about the wrong event.
+		DEBUGS	_DebugPPPWE
+		bank	PPPVars
+		mov	w,PPPEvent		; Load the event.
+		DEBUGB				; Print the state.
+		DEBUGS	_DebugPPPWEState
+		bank	PPPVars
+		mov	w,PPPState		; Load the state.
+		DEBUGB				; Print the state.
+		bank	PPPVars
+	ENDM
+
+ELSE
+
+	DEBUGB	MACRO			; Do nothing.
+	ENDM
+
+	DEBUGS	MACRO	1		; Do nothing.
+	ENDM
+
+	DEBUGEVENT	MACRO
+	ENDM
+
+ENDIF
+
+;-----------------------------------------------------------------------------
+; UART ring macro
+; Advance the pointer through the ring, wrapping around if necessary
+; This could be more efficient for aligned and power of 2 ring sizes.
+;-----------------------------------------------------------------------------
+
+ringadv	MACRO	3		; Arguments ptr,base,size
+	inc	\1		; Increment the pointer
+	; Check for wrap around	
+	mov	w,\1		; Load the pointer	
+	xor	w,#(\2+\3)	; Check if ptr = base+size
+	mov	w,#\2
+	snb	status.2
+	mov	\1,w		; Equal, set ptr to base
+ENDM
+
+;===============================================================================
+; Constants
+;===============================================================================
+
+ClockRate	=	50000000	; 50MHz Clock
+
+;-------------------------------------------------------------------------------
+; Physical layer constants
+;-------------------------------------------------------------------------------
+
+; Ring buffer sizes
+;
+rx_ring_size	equ	7	; Size (in bytes) of the rx ring buffer.
+tx_ring_size	equ	7	; Size of the tx ring buffer.
+
+; In windows 95 the FIFO support must be turned off in the system control panel.
+
+; PPP UART settings
+
+; *** 19200 baud
+baud_bit	=	4                       ;for 19200 baud
+start_delay	=	16+8+1                  ; "    "     "
+int_period	=	163                     ; "    "     "
+
+; Port Assignment: Bit variables
+;
+rx_pin		EQU     rb.0 ; UART receive input
+tx_pin		EQU     rb.2 ; UART transmit output
+rts_pin		EQU	rb.1 ; UART RTS 
+cts_pin		EQU	rb.3 ; UART CTS
+
+;-------------------------------------------------------------------------------
+; PPP constants
+;-------------------------------------------------------------------------------
+
+; PPP packet data format
+PPPFlag		=	$7E
+PPPEscape	= 	$7D
+PPPXor		=	$20
+PPPAddress	=	$FF
+PPPControl	=	$03
+PPPLCPPrefix	=	$C0
+PPPLCP		=	$21
+PPPIPCPPrefix	=	$80
+PPPIPCP		=	$21
+PPPIPPrefix	=	$00
+PPPIP		=	$21
+
+; PPP LCP codes
+PPPConfigureRequest=	1
+PPPConfigureAck	=	2
+PPPConfigureNak	=	3
+PPPConfigureReject=	4
+PPPTerminateRequest=	5
+PPPTerminateAck	=	6
+PPPCodeReject	=	7
+PPPProtocolReject=	8
+PPPEchoRequest	=	9
+PPPEchoReply	=	10
+PPPDiscardRequest=	11
+
+; PPP state machine states.
+PPPStateInitial	=	0
+PPPStateStarting=	1
+PPPStateClosed	=	2
+PPPStateStopped	=	3
+PPPStateClosing	=	4
+PPPStateStopping=	5
+PPPStateReqSent	=	6
+PPPStateAckRcvd	=	7
+PPPStateAckSent	=	8
+PPPStateOpened	=	9
+
+; PPP receive packet state machine.
+PPPStateFlag	=	0
+PPPStateAddress	=	1
+PPPStateControl	=	2	
+PPPStateProto1	=	3
+PPPStateProto2	=	4
+PPPStateLCPCode	=	5
+PPPStateLCPID	=	6
+PPPStateLCPLen1	=	7
+PPPStateLCPLen2	=	8
+PPPStateData	=	9
+PPPStateFCS1	=	10
+PPPStateFCS2	=	11
+PPPStateUnknownCode=	12
+
+; PPP events.
+PPP_NONE	=	0
+PPP_RCA		=	2
+PPP_RCN		=	3
+PPP_RTR		=	4
+PPP_RTA		=	5
+PPP_RUC		=	6
+PPP_RXJ_GOOD	=	7
+PPP_RXJ_BAD	=	8
+PPP_RXR		=	9
+PPP_RCR_GOOD 	= 	10
+PPP_RCR_BAD	=	11
+PPP_TO_GOOD	=	12
+PPP_TO_BAD	=	13
+PPP_DATA	=	14
+
+; PPP IPCP options
+PPPAddressOption =	3
+
+; Frame Check Sequence
+PPPValidFCSh	= 	$F0	
+PPPValidFCSl	= 	$B8
+
+PPPRestartTimeout =	3	; Number of seconds before restart timer expires
+PPPRestartExpire =	16	; 1/(PPPRestartTimeout * 1/(ClockRate) * 256 * 256 * int_period)
+PPPRestartCountDefault	=	3 ; Number of times to send configure-req before giving up.
+
+;-------------------------------------------------------------------------------
+; IP constants
+;-------------------------------------------------------------------------------
+
+IPVersion	=	4	; IP version number.
+IPIHL		=	5	; Header length in number of 32 bit words. 
+IPVIHL		=	(IPVersion<<4) | IPIHL
+IPTOS		=	0	; Type of service. Equals zero for routine service.
+IPFlagsField	=	0	; May fragment, last fragment.
+IPFrag1		=	(IPFlagsField<<5)
+IPFrag2		=	0	; No fragments so fragment offset equals zero.
+IPTTL		=	15	; Time to live (number of hops packet allowed to travel).
+	
+IPProtocolICMP	=	1	; ICMP protocol.
+IPProtocolUDP	=	17	; UDP protcol.
+IPProtocolTCP	=	6	; TCP protocol.
+
+ICMPEchoRequest	=	8	; ICMP echo request packet.
+ICMPEchoReply	=	0	; ICMP echo reply packet.
+ICMPEchoHL	=	8	; Length of an ICMP echo header.
+
+IPAddress1	=	192	; IP address of the SX.
+IPAddress2	=	168
+IPAddress3	=	10
+IPAddress4	=	1
+
+UDPHLength	=	8	; Length of the UDP header.
+
+;-------------------------------------------------------------------------------
+; Application constants
+;-------------------------------------------------------------------------------
+
+DemoPort	=	280	; Port number for SX demo.
+DemoMemDump	=	$10	; Command to dump memory.
+DemoMemSet	=	$20	; Command to set a memory location.
+DemoMemGet	=	$30	; Command to get a memory location.
+DemoHello	=	$40	; Command to return a hello message.
+
+StatusPort	=	ra	; Port for the status LEDs.
+LEDNeg		=	3	; Negotiating LED.
+LEDUP		=	2	; Link Up LED.
+LEDTr		=	1	; Traffic LED.
+LEDErr		=	0	; Error LED.
+
+;===============================================================================
+; Variables
+;===============================================================================
+
+	org	$08
+;-------------------------------------------------------------------------------
+; Global variables
+;-------------------------------------------------------------------------------
+
+Scratch0	ds	1	; Scratch0 is preserved across SOME function calls.
+Scratch1	ds	1	; Scratch1 is never preserved.
+IF DEBUG
+DebugScratch0	ds	1
+DebugScratch1	ds	1
+ENDIF
+
+;-------------------------------------------------------------------------------
+; PPP variables
+;-------------------------------------------------------------------------------
+	org	$10
+PPPVars	=	$
+
+PPPFlags	ds	1	; Flags for the PPP state machine.
+inLCP		=	0	; 1 if the state machine is in LCP negotiation.
+inIPCP		=	1	; 1 if the state machine is in IPCP negotiation.
+inIP		=	2	; 1 if the IP layer is running.
+timerRunning	=	3	; 1 if the restart timer is running.
+linkUp		=	4	; 1 if the PPP link is up.
+addressOption	=	5	; 1 if we are handling a pesky address option.
+PPPState	ds	1	; The state of the PPP state machine. 
+PPPRxState	ds	1	; State of the receive state machine.
+PPPEvent	ds	1	; The last PPP event.
+PPPDelayEvent	ds	1	; Temporarily hold a delayed event.
+PPPProto1	ds	1	; The first byte of the received protocol
+PPPProto2	ds	1	; The second byte of the received protocol
+PPPIdentifier	ds	1	; The received identifier.
+PPPLengthh	ds	1	; The high byte of the received length.
+PPPLengthl	ds	1	; The low byte of the received length.
+PPPTxFCSh	ds	1	; High byte of the Tx frame check sequence.
+PPPTxFCSl	ds	1	; Low byte of the Tx frame check sequence.
+PPPRxFCSh	ds	1	; High byte of the Rx frame check sequence.
+PPPRxFCSl	ds	1	; Low byte of the Rx frame check sequence.
+PPPFCSA		ds	1	; Temporary variable shared by both FCS routines.
+PPPRestartCount	ds	1	; Restart count for PPP state machine.
+
+	org	$30
+IPVars	=	$
+
+IPFlags		ds	1	; Flags used for IP Receive.
+echoPacket	=	0	; Last packet was ICMP echo.
+UDPPacket	=	1	; Current packet is UDP.
+TCPPacket	=	2	; Current packet is TCP.
+ICMPPacket	=	3	; ICMP packet. Will be refined to echoPacket when known.
+unknownPacket	=	4	; Current packet is unknown protocol.
+
+IPTxVars	=	$
+IPProtocol	ds	1	; The protocol contained in the packet.
+IPDestAddress1	ds	1	; IP destination address.
+IPDestAddress2	ds	1
+IPDestAddress3	ds	1
+IPDestAddress4	ds	1
+IPLength	ds	1	; Length of the packet in bytes.
+IPChecksumh	ds	1	; High byte of the IP checksum.
+IPChecksuml	ds	1	; Low byte of the IP checksum.
+IPIDCounter	ds	1	; Counter for the identification field.
+
+IPRxVars	=	$
+IPSrcAddress1	ds	1	; IP source address.
+IPSrcAddress2	ds	1
+IPSrcAddress3	ds	1
+IPSrcAddress4	ds	1
+IPRxLength	ds	1	; Length of the packet in bytes.
+
+	org	$70
+UDPVars		=	$
+
+UDPSrcPortl	ds	1	; The source port.
+UDPSrcPorth	ds	1	
+UDPDestPortl	ds	1	; The destination port.
+UDPDestPorth	ds	1
+UDPLength	ds	1	; Temporary storage for the length.
+UDPRxLength	ds	1	; Length of a received UDP packet.
+
+PPPTimer	=	$
+PPPTimer1	ds	1	; Restart timer for the PPP state machine.
+PPPTimer2	ds	1	; Restart timer for the PPP state machine.
+PPPTimer3	ds	1	; Restart timer for the PPP state machine.
+
+;-------------------------------------------------------------------------------
+; Serial UART variables
+;-------------------------------------------------------------------------------
+	org     $B0             
+serial          =       $       ; Serial UART bank
+;
+save_bank	ds	1
+tx_high         ds      1	;hi byte to transmit
+tx_low          ds      1       ;low byte to transmit
+tx_count        ds      1       ;number of bits sent
+tx_divide       ds      1       ;xmit timing (/16) counter
+rx_count        ds      1       ;number of bits received
+rx_divide       ds      1       ;receive timing counter
+rx_byte         ds      1       ;buffer for incoming byte
+flags		ds	1	; Flags
+rx_flag         EQU     flags.0 ;signals when byte is received.
+rx_over		EQU	flags.1	;signals an overflow.
+rx_ring_ip	ds	1	;receive ring in pointer
+rx_ring_op	ds	1	;receive ring out pointer
+rx_ring_cnt	ds	1	;receive ring contents count
+tx_ring_ip	ds	1	;transmit ring in pointer
+tx_ring_op	ds	1	;transmit ring out pointer
+tx_ring_cnt	ds	1	;transmit ring contents count
+
+	org	$D0		
+uart_rx_ring	=	$	; UART ring buffers
+rx_ring		ds	rx_ring_size	;space for the rx and tx ring buffers
+uart_tx_ring	=	$
+tx_ring		ds	tx_ring_size
+uart_temp	ds	1	; Temporary byte for UART.
+uart_temp_isr	ds	1	; Temporary byte for UART for use in ISR.
+
+IF DEBUG = 1
+	org     $F0                     ;variables
+debug_serial	=       $                       ;UART bank
+
+debug_tx_high	ds      1                       ;hi byte to transmit
+debug_tx_low	ds      1                       ;low byte to transmit
+debug_tx_count	ds      1                       ;number of bits sent
+debug_tx_divide	ds      1                       ;xmit timing (/16) counter
+debug_rx_count	ds      1                       ;number of bits received
+debug_rx_divide	ds      1                       ;receive timing counter
+debug_rx_byte	ds      1                       ;buffer for incoming byte
+debug_rx_flag	EQU     flags.6                 ;signals when byte is received
+debug_save_bank	ds	1
+debug_save_mode	ds	1			;Save the mode register
+
+ENDIF
+
+;===============================================================================
+; Interrupt service routine
+;===============================================================================
+
+		org	$0	; The ISR starts at location 0.
+
+	jmp	@SerialISR	; Use the UART VP
+
+;===============================================================================
+; Jump table
+;===============================================================================
+
+
+ResetVector	jmp	@_ResetVector
+
+		org	$625
+
+PPPInit		jmp	@_PPPInit
+PPPOpen		jmp	@_PPPOpen
+PPPRxData	jmp	@_PPPRxData
+PPPClose	jmp	@_PPPClose
+PPPSendConfReq	jmp	@_PPPSendConfReq
+PPPSendConfRej	jmp	@_PPPSendConfRej
+PPPSendCodeRej	jmp	@_PPPSendCodeRej
+PPPSendConfAck	jmp	@_PPPSendConfAck
+PPPSendTermReq	jmp	@_PPPSendTermReq
+PPPSendPacket	jmp	@_PPPSendPacket
+PPPStartIPPacket	jmp	@_PPPStartIPPacket
+PPPClosePacket	jmp	@_PPPClosePacket
+PPPSendPartialPacket	jmp	@_PPPSendPartialPacket
+PPPReceive	jmp	@_PPPReceive
+PPPTxFCSInit	jmp	@_PPPTxFCSInit
+PPPTxFCSData	jmp	@_PPPTxFCSData
+PPPRxFCSInit	jmp	@_PPPRxFCSInit
+PPPRxFCSData	jmp	@_PPPRxFCSData
+
+IPStartPacket	jmp	@_IPStartPacket
+IPReceivePacket	jmp	@_IPReceivePacket
+IPRxHeader	jmp	@_IPRxHeader
+IPRxClosePacket	jmp	@_IPRxClosePacket
+
+UDPStartPacket	jmp	@_UDPStartPacket
+UDPRxHeader	jmp	@_UDPRxHeader
+
+IPRxData
+PhyRxByte	jmp	@_PhyRxByte
+IPTxData
+PhyTxByte	jmp	@_PhyTxByte
+PhyTxByteNoFCS	jmp	@_PhyTxByteNoFCS
+PhyNoTransTxByte	jmp	@_PhyNoTransTxByte
+PhyRxTest	jmp	@_PhyRxTest
+
+ModemConnect	jmp	@_ModemConnect
+
+GetByte		jmp	@_GetByte
+SendByte	jmp	@_SendByte
+SerialInit	jmp	@_SerialInit
+
+IF DEBUG = 1
+DebugGetByte	jmp	@_DebugGetByte
+DebugSendByte	jmp	@_DebugSendByte
+DebugSendHex	jmp	@_DebugSendHex
+HexDigit	jmp	@_HexDigit
+DebugSendString	jmp	@_DebugSendString
+DebugSerialISR	jmp	@_DebugSerialISR
+ENDIF
+
+;===============================================================================
+; PPP subroutines
+;===============================================================================
+
+	org	$6
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPOpen
+; Subroutine: PPPRxData
+;
+; Open a PPP connection to the peer. This entire routine must fit into a page
+; and not cross any page boundaries. It must also be in the first half of a page.
+;
+; The same state machine is used to negotiate both the LCP and NCP (IPCP)
+; parameters. The flags: PPPFlags.inLCP and PPPFlags.inIPCP indicate the
+; current type of negotiation.
+;
+; W on entry: -
+; W on exit : z is set to 1 if a packet contained IP data, 0 otherwise.
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_PPPOpen
+;	DEBUGS	_DebugPPPOpen
+	bank	PPPVars
+	mov	PPPFlags,#(1<<inLCP)		; Initialize the state.
+initMachine
+	setb	StatusPort.LEDNeg	; Turn on the negotiation LED.
+	mov	PPPState,#PPPStateReqSent	; Reset the state machine.
+	mov	PPPRxState,#PPPStateFlag	; Reset the Rx state machine.
+	mov	PPPRestartCount,#PPPRestartCountDefault
+	call	@PPPSendConfReq		; Send a configure-request
+_PPPRxData
+:eventLoop				; Wait for an event
+	bank	PPPVars
+	mov	PPPEvent,#PPP_NONE	; Assume there will be no event.
+	call	@PhyRxTest		; See if any bytes in receive buffer.
+	sz	
+	jmp	:pollTimer		; No bytes waiting. Check timer.
+	call	@PPPReceive		; Process the received byte.
+	test	PPPEvent		; Check for zero.
+	sz				; Was the event non-zero?		
+	jmp	:stateJump		; Yes. Process it.
+:pollTimer	
+	; Check if the restart timer has expired.
+	sb	PPPFlags.timerRunning	; Is the restart timer running?
+	jmp	:timerEnd		; No.
+	bank	PPPTimer
+	csae	PPPTimer3,#PPPRestartExpire	; Has the restart timer expired?
+	jmp	:timerEnd		; No.
+	mov	w,#0
+	mov	PPPTimer1,w		; Yes. Initialise the restart timer.
+	mov	PPPTimer2,w
+	mov	PPPTimer3,w
+	bank	PPPVars
+	test	PPPRestartCount		; Is the restart count zero?
+	sz
+	mov	PPPEvent,#PPP_TO_GOOD	; Signal the event.
+	snz
+	mov	PPPEvent,#PPP_TO_BAD	; Signal the event.
+	jmp	:stateJump
+
+:timerEnd
+	bank	PPPVars
+	; Call application specific short routine here.
+	jmp	:eventLoop		; Continue polling.
+
+:stateJump
+;	DEBUGS	_DebugPPPLCPState
+IF DEBUG = 1
+;	mov	w,PPPState
+;	DEBUGB
+ENDIF
+	add	PC,PPPState		; Find the state in the jump table.
+	jmp	:Initial
+	jmp	:Starting
+	jmp	:Closed
+	jmp	:Stopped
+	jmp	:Closing
+	jmp	:Stopping
+	jmp	:ReqSent
+	jmp	:AckRcvd
+	jmp	:AckSent
+	jmp	:Opened
+	; Not reached. The routine returns from one of the states.
+
+; At this point W holds the latest event.
+:Initial	jmp	:eventLoop
+:Starting	jmp	:eventLoop
+:Closed		jmp	:eventLoop
+:Stopped	jmp	:eventLoop
+:Closing	jmp	:eventLoop
+:Stopping	jmp	:eventLoop
+
+; State 6 ============================================================
+:ReqSent	
+	cje	PPPEvent,#PPP_RCR_BAD,:6ConfigureReject
+	cje	PPPEvent,#PPP_RCR_GOOD,:6ConfigureReq
+	cje	PPPEvent,#PPP_RCA,:6ConfigureAck
+	cje	PPPEvent,#PPP_TO_GOOD,:6TimerGood
+	cje	PPPEvent,#PPP_TO_BAD,:7TimerBad
+	DEBUGEVENT
+	jmp	:eventLoop
+:6ConfigureReject
+	; We received a configure request with unacceptable options.
+	call	@PPPSendConfRej		; Send a configure reject.
+	jmp	:eventLoop		; Stay in this state.
+:6ConfigureReq
+	; We received an acceptable configure request.
+	call	@PPPSendConfAck		; Send a configure acknowledge.
+	mov	PPPState,#PPPStateAckSent	; Switch states.
+	jmp	:eventLoop
+:6ConfigureAck
+	; We received a configure acknowledgement for our request.
+	; ?? Initialize-Restart-Count
+	mov	PPPState,#PPPStateAckRcvd	; Switch states.
+	jmp	:eventLoop 
+:6TimerGood
+	; The timer expired. Send the configure request packet again.
+	call	@PPPSendConfReq		; Retransmit the confReq
+	jmp	:eventLoop	
+:6TimerBad
+;	DEBUGS	_DebugPPPNoPeer
+	retp				; Return unsuccessful
+
+; State 7 ============================================================
+:AckRcvd
+	cje	PPPEvent,#PPP_RCR_BAD,:7ConfigureReject
+	cje	PPPEvent,#PPP_RCR_GOOD,:7ConfigureReq
+	cje	PPPEvent,#PPP_RCA,:7ConfigureAck
+	cje	PPPEvent,#PPP_TO_GOOD,:7TimerGood
+	cje	PPPEvent,#PPP_TO_BAD,:7TimerBad
+	DEBUGEVENT
+	jmp	:eventLoop
+:7ConfigureReject
+	; We received a configure request with unacceptable options.
+	call	@PPPSendConfRej		; Send a configure reject.
+	jmp	:eventLoop		; Stay in this state.
+:7ConfigureReq
+	; We received an acceptable configure request.
+	call	@PPPSendConfAck		; Send a configure acknowledge.
+	mov	PPPState,#PPPStateOpened	; Switch states.
+	jmp	:eventLoop
+:7ConfigureAck
+	; We received a configure acknowledgement but there was 
+	; no request outstanding. Indicates some sort of problem.
+	jmp	:eventLoop 
+:7TimerGood
+	; The timer expired. Send the configure request packet again.
+	call	@PPPSendConfReq		; Retransmit the confReq
+	mov	PPPState,#PPPStateReqSent	; Switch states.
+	jmp	:eventLoop		
+:7TimerBad
+;	DEBUGS	_DebugPPPNoPeer
+	retp				; Return unsuccessful
+
+; State 8 ============================================================
+:AckSent
+	cje	PPPEvent,#PPP_RCR_BAD,:8ConfigureReject
+	cje	PPPEvent,#PPP_RCR_GOOD,:8ConfigureReq
+	cje	PPPEvent,#PPP_RCA,:8ConfigureAck
+	cje	PPPEvent,#PPP_TO_GOOD,:8TimerGood
+	cje	PPPEvent,#PPP_TO_BAD,:8TimerBad
+;	DEBUGEVENT
+	jmp	:eventLoop
+:8ConfigureReject
+	; We received a configure request with unacceptable options.
+	call	@PPPSendConfRej		; Send a configure reject.
+	mov	PPPState,#PPPStateReqSent	; Switch states.
+	jmp	:eventLoop		
+:8ConfigureReq
+	; We received an acceptable configure request.
+	call	@PPPSendConfAck		; Send a configure acknowledge.
+	jmp	:eventLoop		; Stay in this state.
+:8ConfigureAck
+	; We received a configure acknowledgement. Negotiation is 
+	; complete.
+	mov	PPPState,#PPPStateOpened	; Switch states.
+	jmp	:eventLoop 
+:8TimerGood
+	; The timer expired. Send the configure request packet again.
+	call	@PPPSendConfReq		; Retransmit the confReq
+	jmp	:eventLoop	
+:8TimerBad
+;	DEBUGS	_DebugPPPNoPeer
+	retp				; Return unsuccessful
+	
+; State 9 ============================================================
+:Opened		
+	clrb	PPPFlags.timerRunning	; Stop the restart timer.
+	sb	PPPFlags.inLCP	; Are we currently doing LCP negotiation?
+	jmp	:IPCP	; No. Try IPCP.
+	; The LCP layer is now up. Start the network layer.	
+	clrb	PPPFlags.inLCP	; We are finished with LCP negotiation.
+	setb	PPPFlags.inIPCP	; Start the IPCP negotiation.
+	jmp	initMachine	; Restart the state machine with IPCP.
+:IPCP	
+	sb	PPPFlags.inIPCP	; Are we currently doing IPCP negotiation?
+	jmp	:IP		; No. Try IP
+	; PPP with IP is now up.
+	DEBUGS	_DebugPPPIPUP
+	setb	PPPFlags.linkUp
+	setb	StatusPort.LEDUp	; Light up the link up LED.
+	clrb	StatusPort.LEDNeg	; Turn of the negotiation LED.
+	setb	PPPFlags.inIP
+	clrb	PPPFlags.inIPCP
+	retp			; The link is up, return successfully.
+
+:IP
+	sb	PPPFlags.inIP	; Is an IP connection open?
+	jmp	:error	; No. Report an error.
+	cje	PPPEvent,#PPP_DATA,:data	; Was the event IP data?
+	cje	PPPEvent,#PPP_RTR,:TermReq	; Was the event a terminate request?
+	clrb	z
+	retp
+:data	setb	z	
+	retp			; Return.
+:TermReq
+	mov	PPPFlags,#0	; Signal the link is down.
+	clrb	StatusPort.LEDUp
+	clrb	z
+	retp
+
+:error	setb	StatusPort.LEDErr
+	jmp	:error	
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPInit
+;
+; Initialize the PPP layer.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_PPPInit
+	mov	PPPState,#0		; Reset the state machine.
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendConfReq 
+;
+; Send a configure-request packet to the peer. This packet contains the LCP
+; options that we wish to negotiate.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+	
+_PPPSendConfReq
+	bank	PPPTimer		
+	mov	w,#0
+	mov	PPPTimer1,w		; Initialise the restart timer.
+	mov	PPPTimer2,w
+	mov	PPPTimer3,w
+	bank	PPPVars
+	dec	PPPRestartCount		; Decrement the restart count.
+	setb	PPPFlags.timerRunning	; Start the restart timer.
+	snb	PPPFlags.inLCP			; Are we in LCP negotiation?
+	mov	w, #_PPPConfReqPacketLCP	; Load the packet offset
+	snb	PPPFlags.inIPCP			; Are we in IPCP negotiation?
+	mov	w, #_PPPConfReqPacketIPCP	; Load the packet offset
+	jmp	@PPPSendPacket	; Send the packet.
+	; Return directly from PPPSendPacket
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPStartIPPacket
+;
+; Send an IP packet header.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+	
+_PPPStartIPPacket
+	mov	w, #_PPPIPPacket	; Load the packet offset
+	jmp	@PPPSendPartialPacket	; Send the packet.
+	; Return directly from PPPSendPacket
+
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendTermReq
+;
+; Send a terminate-request packet to the peer. This packet tells the peer we
+; are closing the link.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+	
+_PPPSendTermReq
+	snb	PPPFlags.inLCP			; Are we in LCP negotiation?
+	mov	w, #_PPPTermReqPacketLCP	; Load the packet offset
+	snb	PPPFlags.inIPCP			; Are we in IPCP negotiation?
+	mov	w, #_PPPTermReqPacketIPCP	; Load the packet offset
+	jmp	@PPPSendPacket	; Send the packet.
+	; Return directly from PPPSendPacket
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendPacket
+;
+; Send a canned packet. Scratch0 holds the address of the next byte. 
+;
+; W on entry: start address of the packet to send
+; W on exit : -
+; Variables : Scratch0, Scratch1
+;-------------------------------------------------------------------------------
+	
+_PPPSendPacket
+	call	@PPPSendPartialPacket
+	jmp	@PPPClosePacket
+	
+;-------------------------------------------------------------------------------
+; Subroutine: PPPClosePacket
+;
+; Close a packet by sending the FCS and flag character.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_PPPClosePacket
+	bank	PPPVars
+	mov	w,/PPPTxFCSl	; Send the complemented FCS LSB first.
+	call	@PhyTxByteNoFCS	; Transmit it over the physical layer.
+	bank 	PPPVars
+	mov	w,/PPPTxFCSh	
+	call	@PhyTxByteNoFCS	
+	mov	w,#PPPFlag	; Send the flag character
+	call	@PhyNoTransTxByte	; Transmit without transparency.
+	bank	PPPVars
+	retp
+	
+;-------------------------------------------------------------------------------
+; Subroutine: PPPClose
+;
+; Close the open PPP connection.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_PPPClose
+	bank	PPPVars
+	call	@PPPSendTermReq		; Send the terminate request.
+	clrb	PPPFlags.inIPCP		; Switch back to LCP mode.
+	setb	PPPFlags.inLCP		
+	call	@PPPSendTermReq		; Send the terminate request.
+	; We don't bother waiting for a reply
+	clrb	PPPFlags.linkUp
+	DEBUGS	_DebugPPPDown
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPXxFCSInit 
+;
+; Initialize the frame check sequence.
+;
+; W on entry: -
+; W on exit : -
+; Variables : PPPFCSh,PPPFCSl
+;-------------------------------------------------------------------------------
+
+_PPPRxFCSInit
+	mov	w,#$ff			; Init FCS to $FFFF
+	mov	PPPRxFCSh,w		
+	mov	PPPRxFCSl,w	
+	retp
+
+_PPPTxFCSInit
+	mov	w,#$ff			; Init FCS to $FFFF
+	mov	PPPTxFCSh,w		
+	mov	PPPTxFCSl,w	
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPCheckFCS
+;
+; Check that the FCS for a PPP frame is valid. The two FCS bytes must be the 
+; next bytes to be received.
+;
+; W on entry: -
+; W on exit : z is set to 1 if the frame is valid, 0 otherwise.
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_PPPCheckFCS
+	call	@PhyRxByte	; Receive the FCS.
+	call	@PhyRxByte
+	cse	PPPRxFCSh,#PPPRxFCSh	; Test the upper byte.
+	jmp	:invalid
+	cse	PPPRxFCSl,#PPPRxFCSl	; Test the lower byte.
+	jmp	:invalid
+	setb	z
+	retp
+:invalid
+	clrb	z
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPFCSData
+;
+; Accumulate a byte for the FCS. The FCS is computed a byte at a time as the 
+; data is transmitted.
+;
+; W is preserved by this routine.
+;
+; W on entry: data byte
+; W on exit : data byte
+; Variables : Scratch1,PPPFCSl,PPPFCSh,PPPFCSA
+;-------------------------------------------------------------------------------
+
+_PPPTxFCSData
+	bank	PPPVars
+	mov	Scratch1,w			;Save W
+	xor	PPPTxFCSl,w			;FCSl[=X] = FCSl xor w
+	mov	w,<>PPPTxFCSl			;w = FCSl[32107654]
+	and	w,#%11110000			;w = FCSl[3210oooo]
+	xor	PPPTxFCSl,w			;FCSl = FCSl xor (FCSl shl 4)
+						;Calculate A = FCSh
+	mov	w,<>PPPTxFCSl			;w = FCSl[32107654]
+	mov	PPPFCSA,w			;A = FCSl[32107654]
+	mov	w,>>PPPFCSA			;w = FCSl[x3210765]
+	and	w,#%00000111			;w = FCSl[ooooo765]
+	xor	w,PPPTxFCSl			;w = FCSl xor (FCSl shr 5)
+	mov	PPPFCSA,w			;store w into A = new FCSh value
+						;Calculate new FCSl value
+	rl	PPPTxFCSl	
+	rl	PPPTxFCSl	
+	mov	w,<<PPPTxFCSl			;w = FCSl[43210xxx]
+	and	w,#%11111000			;w = FCSl[43210ooo]
+	xor	w,PPPTxFCSh			;w = (FCSl shl 3) xor FCSh
+	mov	PPPTxFCSl,w			;Store w into FCSl
+	mov	w,<>PPPFCSA			;w = A[32107654]
+	and	w,#%00001111			;w = A[oooo7654]
+	xor	PPPTxFCSl,w			;FCSl = (FCSl shl 3) xor FCSh xor (A shr 4)
+						;Store new FCSh value
+	mov	w,PPPFCSA			;A holds FCSh value
+	mov	PPPTxFCSh,w			;Store A in FCSh
+	mov	w,Scratch1
+	retp
+
+_PPPRxFCSData
+	bank	PPPVars
+	mov	Scratch1,w			;Save w.
+	xor	PPPRxFCSl,w			;FCSl[=X] = FCSl xor w
+	mov	w,<>PPPRxFCSl			;w = FCSl[32107654]
+	and	w,#%11110000			;w = FCSl[3210oooo]
+	xor	PPPRxFCSl,w			;FCSl = FCSl xor (FCSl shl 4)
+						;Calculate A = FCSh
+	mov	w,<>PPPRxFCSl			;w = FCSl[32107654]
+	mov	PPPFCSA,w			;A = FCSl[32107654]
+	mov	w,>>PPPFCSA			;w = FCSl[x3210765]
+	and	w,#%00000111			;w = FCSl[ooooo765]
+	xor	w,PPPRxFCSl			;w = FCSl xor (FCSl shr 5)
+	mov	PPPFCSA,w			;store w into A = new FCSh value
+						;Calculate new FCSl value
+	rl	PPPRxFCSl	
+	rl	PPPRxFCSl	
+	mov	w,<<PPPRxFCSl			;w = FCSl[43210xxx]
+	and	w,#%11111000			;w = FCSl[43210ooo]
+	xor	w,PPPRxFCSh			;w = (FCSl shl 3) xor FCSh
+	mov	PPPRxFCSl,w			;Store w into FCSl
+	mov	w,<>PPPFCSA			;w = A[32107654]
+	and	w,#%00001111			;w = A[oooo7654]
+	xor	PPPRxFCSl,w			;FCSl = (FCSl shl 3) xor FCSh xor (A shr 4)
+						;Store new FCSh value
+	mov	w,PPPFCSA			;A holds FCSh value
+	mov	PPPRxFCSh,w			;Store A in FCSh
+	mov	w,Scratch1			;Restore w
+	retp
+
+;-------------------------------------------------------------------------------
+; Canned PPP packets. The packet is terminated with a word with $f in the high nibble.
+;-------------------------------------------------------------------------------
+
+_PPPCannedPackets	=	$
+_PPPConfReqPacketLCP	dw	$FF, $03, $C0, $21, $01, $01, $00, $04 + $f00
+_PPPCodeRejPacketLCP	dw	$FF, $03, $C0, $21, $07, $01 + $f00
+_PPPConfRejPacketLCP	dw	$FF, $03, $C0, $21, $04 + $f00
+_PPPConfAckPacketLCP	dw	$FF, $03, $C0, $21, $02 + $f00
+_PPPTermReqPacketLCP	dw	$FF, $03, $C0, $21, $05, $01, $00, $04 + $f00
+
+_PPPConfReqPacketIPCP	dw	$FF, $03, $80, $21, $01, $01, $00, $0A, $03, $06, IPAddress1, IPAddress2, IPAddress3, IPAddress4 + $f00
+_PPPCodeRejPacketIPCP	dw	$FF, $03, $80, $21, $07, $01 + $f00
+_PPPConfRejPacketIPCP	dw	$FF, $03, $80, $21, $04 + $f00
+_PPPConfAckPacketIPCP	dw	$FF, $03, $80, $21, $02 + $f00
+_PPPTermReqPacketIPCP	dw	$FF, $03, $80, $21, $05, $01, $00, $04 + $f00
+
+_PPPIPPacket		dw	$FF, $03, $00, $21 + $f00
+_hello_message	dw	'SX PPP-UDP Demo. 2K code, 136 byte RAM', 0 + $f00
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPReceive
+;
+; Receive a packet a byte at a time using a state machine. If the received byte
+; indicates an event then PPPEvent is set.
+;
+; W on entry: -
+; W on exit : Received byte (when receiving data).
+; Variables : SCRATCH0,PPPRxState,PPPEvent
+;-------------------------------------------------------------------------------
+
+	org	$200
+
+_PPPReceive
+	call	@PhyRxByte	; Receive a byte.
+	mov	Scratch0,w	; Save the byte.
+	DEBUGS	_DebugPPPRx
+	mov	w,Scratch0	; Retrieve a the received byte.
+	call	@PPPRxFCSData	; Accumulate the FCS.
+	DEBUGB
+	DEBUGS	_DebugPPPState
+	bank	PPPVars
+	mov	w,PPPRxState	; Load the receiver state.
+	DEBUGB	
+	bank	PPPVars
+	jmp	@:tableStart
+	
+	; The jump table must not cross a 256-word boundary.
+:tableStart
+	jmp	PC+W		; Jump into the table.
+	jmp	:Flag
+	jmp	:Address
+	jmp	:Control
+	jmp	:Proto1
+	jmp	:Proto2
+	jmp	:LCPCode
+	jmp	:LCPID
+	jmp	:LCPLen1
+	jmp	:LCPLen2
+	jmp	:Data
+	jmp	:FCS1
+	jmp	:FCS2	
+
+:Flag
+	cse	SCRATCH0,#PPPFlag	; We expect the flag
+	retp		; Didn't get it
+	mov	PPPRxState,#PPPStateAddress; Goto the next state.
+	call	@PPPRxFCSInit		; Initialize the FCS.
+	retp
+:Address
+	cje	SCRATCH0,#PPPAddress,:GotAddress	; We expect the address
+	cje	SCRATCH0,#PPPFlag,:GotFlag	; Did we get a flag?
+	jmp	:resetRx	; Didn't get it
+:GotAddress
+	mov	PPPRxState,#PPPStateControl	; Goto the next state.
+:GotFlag					; Stay in this state.
+	retp
+
+:Control
+	cse	SCRATCH0,#PPPControl	; We expect the address
+	jmp	:resetRx	; Didn't get it
+	mov	PPPRxState,#PPPStateProto1	; Goto the next state.
+	retp
+:Proto1
+	mov	PPPProto1,SCRATCH0	; Save the first byte of the protocol.
+	mov	PPPRxState,#PPPStateProto2
+	retp
+
+:Proto2
+	cje	PPPProto1,#PPPLCPPrefix,:ProtoLCPPrefix
+	cje	PPPProto1,#PPPIPCPPrefix,:ProtoIPCPPrefix
+	cje	PPPProto1,#PPPIPPrefix,:ProtoIP
+	; Unknown protocol.
+	mov	PPPRxState,#PPPStateFlag	; Reset the receive state machine.
+	; Silently discard the packet. The discard is done by restarting the state machine
+	; and assuming it won't resynchronize until the next legitimate packet.
+	retp
+:ProtoLCPPrefix
+	cje	SCRATCH0,#PPPLCP,:ProtoLCP
+	;cje	...
+	; Unknown protocol.
+	mov	PPPRxState,#PPPStateFlag	; Reset the receive state machine.
+	; Silently discard the packet.
+	retp
+:ProtoLCP	
+	mov	PPPRxState,#PPPStateLCPCode	; Goto the next state
+	retp
+:ProtoIPCPPrefix
+	cje	SCRATCH0,#PPPLCP,:ProtoIPCP
+	;cje	...
+	; Unknown protocol.
+	mov	PPPRxState,#PPPStateFlag	; Reset the receive state machine.
+	; Silently discard the packet.
+	retp
+:ProtoIPCP
+	sb	PPPFlags.inIPCP		; Are we doing IPCP?
+	jmp	:ResetRx		; No. Discard the packet.	
+	mov	PPPRxState,#PPPStateLCPCode	; Goto the next state
+	retp
+:ProtoIPPrefix
+	cje	SCRATCH0,#PPPIP,:ProtoIP
+	; Unknown protocol.
+	mov	PPPRxState,#PPPStateFlag	; Reset the receive state machine.
+	; Silently discard the packet.
+	retp
+:ProtoIP
+	mov	PPPEvent,#PPP_DATA
+	mov	PPPRxState,#PPPStateFlag	; Restart the recevie state machine.
+	retp
+
+:LCPCode
+	cje	SCRATCH0,#PPPConfigureRequest,:PPPConfigureRequest
+	cje	SCRATCH0,#PPPConfigureAck,:PPPConfigureAck
+	cje	SCRATCH0,#PPPTerminateRequest,:PPPTermReq
+	mov	PPPDelayEvent,#PPP_RUC	; By default we assume it was an unknown code
+	mov	PPPRxState,#PPPStateLCPID	; Goto the next state
+	retp
+:PPPConfigureRequest
+	; We received a configure request. Since we don't accept any options we 
+	; need to see if any options are included. For now assume it is bad.
+	mov	PPPDelayEvent,#PPP_RCR_BAD	
+	mov	PPPRxState,#PPPStateLCPID	; Goto the next state
+	retp
+:PPPConfigureAck
+	; We received a configure acknowledge. Since we negotiate no options it 
+	; should be empty. 
+	mov	PPPDelayEvent,#PPP_RCA	
+	mov	PPPRxState,#PPPStateLCPID	; Goto the next state
+	retp
+:PPPTermReq
+	mov	PPPDelayEvent,#PPP_RTR	
+	mov	PPPRxState,#PPPStateLCPID	; Goto the next state
+	retp
+
+:LCPID
+	mov	PPPIdentifier,Scratch0		; Save the identifier
+	mov	PPPRxState,#PPPStateLCPLen1	; Goto the next state
+	retp
+:LCPLen1
+	mov	PPPLengthh,Scratch0		; Save the length
+	mov	PPPRxState,#PPPStateLCPLen2	; Goto the next state
+	retp
+:LCPLen2
+	mov	PPPLengthl,Scratch0		; Save the length
+	mov	PPPRxState,#PPPStateData	; Goto the next state
+	mov	PPPEvent,PPPDelayEvent		; Now send the delayed event.
+	cje	PPPEvent,#PPP_RCR_BAD,:CheckLength ; Make sure the confReq is really unacceptable	
+	retp
+:CheckLength
+	cse	PPPLengthl,#4		; Is the LSB of the length 4?			
+	jmp	:unacc			; No, now check if the option is really unacceptable.
+	test	PPPLengthh		; Is the MSB zero?
+	sz
+	retp				; No, we're done.
+	mov	PPPEvent,#PPP_RCR_GOOD	; We received a length 4 confReq. It is good.
+	retp
+
+:unacc	
+	; The option appears unacceptable. However... we must accept the IPCP Address option
+	; from Windows 95 or else it complains that we can't do IP. So...
+	sb	PPPFlags.inIPCP		; Are we doing IPCP?
+	retp				; No, return.
+	cse	PPPLengthl,#10		; Is the length 10?
+	retp				; No, it can't be an address option only.
+	mov	PPPEvent,#PPP_NONE	; Yes, Signal no event, we need to wait for the option.	
+	setb	PPPFlags.addressOption	; Provisionally mark the event as good.
+	retp
+
+:Data	
+	sb	PPPFlags.inIPCP		; Are we doing IPCP?
+	jmp	:ResetRx		; No, gobble the packet.
+	sb	PPPFlags.addressOption	; Are we processing a potential good request
+	jmp	:ResetRx		; No
+	csne	Scratch0,#PPPEscape	; Is it the escape character?
+	retp					; Get more data.
+	cse	Scratch0,#PPPAddressOption	; Is it the address option?
+	jmp	:ResetRx			; No, discard the rest of the packet.
+	mov	PPPEvent,#PPP_RCR_GOOD	; Signal a good conf-req.
+	retp			
+	
+	; All of these cause the state machine to restart and gobble data up to	
+	; the start of the next packet.
+:FCS1
+:FCS2
+
+:ResetRx
+	clrb	PPPFlags.addressOption
+	mov	PPPRxState,#PPPStateFlag	; Restart the receive state machine.
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendCodeReject 
+;
+; Send a code-reject packet to the peer. The information field of the packet
+; contains the received packet, starting at the information field, and not 
+; including the FCS.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+	
+_PPPSendCodeRej
+	snb	PPPFlags.inLCP			; Are we in LCP negotiation?
+	mov	w, #_PPPCodeRejPacketLCP	; Load the packet offset
+	snb	PPPFlags.inIPCP			; Are we in IPCP negotiation?
+	mov	w, #_PPPCodeRejPacketIPCP	; Load the packet offset
+	call	@PPPSendPartialPacket	; Send the first part of the packet.
+	bank	PPPVars			; Set the bank
+	clc
+	mov	w,#4			; The extra header adds 4 to the length
+	add	PPPLengthl,w		; Add the length
+	snc				; Was there a carry?
+	inc	PPPLengthh		; Yes, increment the high byte
+	mov	w,PPPLengthh		; Load the length
+	mov	w,PPPLengthh		; Load the length	
+IF DEBUG = 1
+	DEBUGB
+ENDIF
+	call	@PhyTxByte
+	mov	w,PPPLengthl		; Load the length
+IF DEBUG = 1
+	DEBUGB
+ENDIF
+	call	@PhyTxByte
+
+	; Send the received packet.
+		
+	jmp	@PPPClosePacket		; Send the FCS and flag character.
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendConfAck 
+;
+; Send a configure-acknowledge packet to the peer. The packet must contain
+; the same identifier as the packet being acknowledged.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+	
+_PPPSendConfAck
+	snb	PPPFlags.inLCP			; Are we in LCP negotiation?
+	mov	w, #_PPPConfAckPacketLCP	; Load the packet offset
+	snb	PPPFlags.inIPCP			; Are we in IPCP negotiation?
+	mov	w, #_PPPConfAckPacketIPCP	; Load the packet offset
+	call	@PPPSendPartialPacket
+	bank	PPPVars			; Set the bank
+	mov	w,PPPIdentifier		; Load the ID from the received packet.
+	call	@PhyTxByte		; Transmit.
+	bank	PPPVars
+	mov	w,PPPLengthh		; Load the length from the received packet.
+	call	@PhyTxByte		; Transmit.
+	bank	PPPVars
+	mov	w,PPPLengthl		; Load the ID from the received packet.
+	call	@PhyTxByte		; Transmit.
+	; Now use the length to count in the received bytes and retransmit them.
+	; First subtract the header length from the length.
+	bank 	PPPVars
+	mov	w,#4-1			; Load the header length.
+	sub	PPPLengthl,w		; Subtract from the LSB
+	sc
+	dec	PPPLengthh
+	mov	w,#0			; Load the MSB of the header length
+	sub	PPPLengthh,w		; Subtract the MSB	
+	; If this is an address option then send the option.
+	sb	PPPFlags.addressOption	; Is it an address option?
+	jmp	:midloop			; No.
+	mov	w,#PPPAddressOption
+	call	@PhyTxByte		; Send it
+	bank	PPPVars
+	dec	PPPLengthl		; Decrement the length by 1.
+	clrb	PPPFlags.addressOption	; Clear the address option flag.
+	jmp	:midloop
+	; Now loop for each received byte.
+:loop	call	@PhyRxByte		; Receive a byte.
+	call	@PPPRxFCSData		; Accumulate the FCS on the receiver side.
+	call	@PhyTxByte		; Retransmit the byte.
+	bank 	PPPVars
+:midloop dec	PPPLengthl		; Decrement the count.
+	sz				; Is it zero?
+	jmp	:loop			; No, loop again.
+	test	PPPLengthh		; Is the MSB zero?	
+	snz
+	jmp	:done			; Yes, we're done.
+	dec 	PPPLengthh		; No, decrement.
+	dec	PPPLengthl
+	jmp	:loop
+
+:done	jmp	@PPPClosePacket		; Send the FCS and close the packet.
+	; Return directly from PPPClosePacket
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendConfRej 
+;
+; Send a configure-reject packet. The rejected options fields are copied from 
+; the received packet.
+;
+; The first portion of the packet, up to and including the Code, is canned 
+; and sent as a string. The identifier and length are copied from the recieved
+; packet. Then the options are copied from the received packet to the new packet.
+;
+; The remaineder of the received packet (FCS and flag) are discarded by the 
+; next state.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+	
+_PPPSendConfRej
+	snb	PPPFlags.inLCP			; Are we in LCP negotiation?
+	mov	w, #_PPPConfRejPacketLCP	; Load the packet offset
+	snb	PPPFlags.inIPCP			; Are we in IPCP negotiation?
+	mov	w, #_PPPConfRejPacketIPCP	; Load the packet offset
+	call	@PPPSendPartialPacket	; Send the first part of the packet.
+	bank	PPPVars			; Set the bank
+	mov	w,PPPIdentifier		; Load the ID from the received packet.
+	call	@PhyTxByte		; Transmit.
+	bank	PPPVars
+	mov	w,PPPLengthh		; Load the length from the received packet.
+	call	@PhyTxByte		; Transmit.
+	bank	PPPVars
+	mov	w,PPPLengthl		; Load the ID from the received packet.
+	call	@PhyTxByte		; Transmit.
+	; Now use the length to count in the received bytes and retransmit them.
+	; First subtract the header length from the length.
+	bank 	PPPVars
+	mov	w,#4			; Load the header length minus 1.
+	sub	PPPLengthl,w		; Subtract from the LSB
+	sc
+	dec	PPPLengthh
+	mov	w,#0			; Load the MSB of the header length
+	sub	PPPLengthh,w		; Subtract the MSB	
+	; Now loop for each received byte.
+:loop	call	@PhyRxByte		; Receive a byte.
+	call	@PPPRxFCSData		; Accumulate the FCS on the receiver side.
+	call	@PhyTxByte		; Retransmit the byte.
+	bank 	PPPVars
+	dec	PPPLengthl		; Decrement the count.
+	sz				; Is it zero?
+	jmp	:loop			; No, loop again.
+	test	PPPLengthh		; Is the MSB zero?	
+	snz
+	jmp	:done			; Yes, we're done.
+	dec PPPLengthh			; No, decrement.
+	dec PPPLengthl
+	jmp	:loop
+:done	jmp	@PPPClosePacket		; Send the FCS and flag character.
+
+;-------------------------------------------------------------------------------
+; Subroutine: PPPSendPartialPacket
+;
+; Send a canned packet without adding the frame check sequence. 
+;
+; W on entry: start address of the packet to send
+; W on exit : -
+; Variables : Scratch0, Scratch1
+;-------------------------------------------------------------------------------
+	
+_PPPSendPartialPacket
+	mov	Scratch0,w	; Save the start address.
+	DEBUGS	_DebugPPPSend
+	mov	w,#PPPFlag	; Send the start flag
+	call	@PhyNoTransTxByte	; Transmit without transparency.
+	bank 	PPPVars
+	call	@PPPTxFCSInit	; Initialize the FCS
+:loop	mov	m, #(_PPPCannedPackets>>8)	; Load the mode register.
+	mov	w,Scratch0	; Load the pointer
+	iread			; Read the next byte.
+	bank	PPPVars
+	call	@PhyTxByte	; Transmit it over the physical layer.
+	bank 	PPPVars
+	mov	w,m		; Load the mode register.
+	test	w
+	sz			; If it is not zero then exit.
+	jmp	:done		; We're done transmitting.
+	inc	Scratch0	; Increment the pointer
+	jmp	:loop		
+:done
+	retp
+	
+;===============================================================================
+; IP subroutines
+;===============================================================================
+
+;-------------------------------------------------------------------------------
+; Subroutine: IPStartPacket
+;
+; Start transmitting an IP packet. First a physical layer header is transmitted
+; followed by the IP header. Information about the packet destination and length
+; is read from the IPVars bank variables.
+;
+; Comments on the IP header checksum:
+;
+; The checksum is computed over the header fields only and is the 16 bit 
+; complement of the 16 bit ones complement sum. The checksum field is set to
+; zero to compute the checksum. To simplify the checksum calculation all fields
+; that are known a priori are calculated below:
+;
+; Version/IHL/TOS              4500
+; Total length                    ?
+; ID                              ?
+; Flags/Fragment offset        0000
+; TTL/Protocol                    ?
+; Checksum                     0000
+; Source Address               IPAddress1<<8 | IPAddress2
+; Source Address               IPAddress3<<8 | IPAddress4
+; Dest Address                    ?
+;
+;
+cs1	=	$4500 + (IPAddress1<<8 | IPAddress2) + (IPAddress3<<8 | IPAddress4)
+if cs1 > $10000
+	cs2	=	cs1 + 1 - $10000
+else
+	cs2	=	cs1
+endif
+
+CSADDVV	MACRO	2
+	mov	w,\2		; Load the LSB
+	add	IPChecksuml,w	; Add it to the checksum 
+	snc			; Was there a carry?
+	inc	IPChecksumh	; Yes
+	mov	w,\1		; Load the MSB
+	add	IPChecksumh,w	; Add it to the checksum 
+	snc			; Was there a carry?
+	inc	IPChecksuml	; Yes. This time it is added to the LSB.
+ENDM
+
+CSADDCV	MACRO	2
+	mov	w,\2		; Load the LSB
+	add	IPChecksuml,w	; Add it to the checksum 
+	snc			; Was there a carry?
+	inc	IPChecksumh	; Yes
+	mov	w,#\1		; Load the MSB
+	add	IPChecksumh,w	; Add it to the checksum 
+	snc			; Was there a carry?
+	inc	IPChecksuml	; Yes. This time it is added to the LSB.
+ENDM
+
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_IPStartPacket
+	call	@PPPStartIPPacket		; Send a PPP IP packet header.
+	bank	IPVars
+	mov	IPChecksumh,#(cs2>>8)&$00ff	; Initialize the checksum.
+	mov	IPChecksuml,#cs2&$00ff
+	; Increase the length by the header length.
+	add	IPLength,#(IPIHL<<2)	; Add the header length times 4.
+	; Compute the checksum
+	CSADDCV	0,IPLength
+	CSADDCV	0,IPIDCounter
+	CSADDCV	IPTTL,IPProtocol
+	CSADDVV	IPDestAddress1,IPDestAddress2
+	CSADDVV	IPDestAddress3,IPDestAddress4
+	not	IPChecksumh
+	not	IPChecksuml
+	mov	w,#IPVIHL
+	call	@PhyTxByte
+	mov	w,#IPTOS
+	call	@PhyTxByte
+	mov	w,#0		; Assume that the length is always < 256.
+	call	@PhyTxByte	
+	bank	IPVars
+	mov	w,IPLength
+	call	@PhyTxByte
+	mov	w,#$00		; The identifier.
+	call	@PhyTxByte
+	bank	IPVars	
+	mov	w,IPIDCounter	; Load the counter before incrementing.
+	inc	IPIDCounter	; Increment the counter.
+	call	@PhyTxByte		
+	mov	w,#IPFrag1	
+	call	@PhyTxByte
+	mov	w,#IPFrag2	
+	call	@PhyTxByte
+	mov	w,#IPTTL
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPProtocol	
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPChecksumh
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPChecksuml
+	call	@PhyTxByte
+	mov	w,#IPAddress1
+	call	@PhyTxByte	
+	mov	w,#IPAddress2
+	call	@PhyTxByte
+	mov	w,#IPAddress3
+	call	@PhyTxByte
+	mov	w,#IPAddress4
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPDestAddress1
+	call	@PhyTxByte	
+	bank	IPVars
+	mov	w,IPDestAddress2
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPDestAddress3
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPDestAddress4
+	call	@PhyTxByte
+	; There are no options.
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: IPRxHeader
+;
+; Receive an IP packet header. If the header is not valid then the Z flag is set.
+;
+; W on entry: -
+; W on exit : Z is set to 1 if the packet is invalid, 0 otherwise.
+; Variables : -
+;-------------------------------------------------------------------------------
+
+	org 	$400
+
+_IPRxHeader
+	call	@PhyRxByte	; Receive a byte.
+	xor	w,#((IPVersion<<4)|IPIHL) ; We only accept packets with a HL of 5.
+	sz
+	jmp	:Invalid
+	call	@PhyRxByte	; Ignore the type of service
+	call	@PhyRxByte	
+	sz			; Is the high byte of the length zero?
+	jmp	:Invalid	; No, abort, we only accept packets < 256 bytes.
+	call	@PhyRxByte
+	bank	IPRxVars
+	mov	IPRxLength,w	; Save the packet length.
+	call	@PhyRxByte	; Ignore the ID.
+	call	@PhyRxByte	
+	call	@PhyRxByte	; Ignore the fragment info.
+	call	@PhyRxByte	
+	call	@PhyRxByte	; Ignore the TTL.
+	call	@PhyRxByte	; Receive the protocol.
+	bank	IPVars
+	mov	SCRATCH0,w
+	csne	SCRATCH0,#IPProtocolICMP
+	setb	IPFlags.ICMPPacket
+	csne	SCRATCH0,#IPProtocolTCP
+	setb	IPFlags.TCPPacket
+	csne	SCRATCH0,#IPProtocolUDP
+	setb	IPFlags.UDPPacket
+	call	@PhyRxByte	; Live dangerously, Ignore the header checksum.	
+	call	@PhyRxByte	
+	call	@PhyRxByte
+	bank	IPRxVars
+	mov	IPSrcAddress1,w	; Save the source address.
+	call	@PhyRxByte
+	bank	IPRxVars
+	mov	IPSrcAddress2,w	; Save the source address.
+	call	@PhyRxByte
+	bank	IPRxVars
+	mov	IPSrcAddress3,w	; Save the source address.
+	call	@PhyRxByte
+	bank	IPRxVars
+	mov	IPSrcAddress4,w	; Save the source address.
+	call	@PhyRxByte
+	xor	w,#IPAddress1 	; Verify that the packet is for us.
+	sz
+	jmp	:Invalid
+	call	@PhyRxByte
+	xor	w,#IPAddress2 	; Verify that the packet is for us.
+	sz
+	jmp	:Invalid
+	call	@PhyRxByte
+	xor	w,#IPAddress3 	; Verify that the packet is for us.
+	sz
+	jmp	:Invalid
+	call	@PhyRxByte
+	xor	w,#IPAddress4 	; Verify that the packet is for us.
+	sz
+	jmp	:Invalid
+	; That's the whole header.
+	clrb	z
+	retp			; Return successful.
+:Invalid
+	setb	z
+	retp			; Return unsuccessful.
+
+;-------------------------------------------------------------------------------
+; Subroutine: IPReceivePacket
+;
+; Receive the next IP packet. This routine DOES NOT block if there is no packet 
+; to receive. Bits are set in IPFlags acording to the packet type received. 
+; The following actions are taken:
+;
+;    1. ICMP echo packet - send response, set echo flag (just for info purposes).
+;    2. UDP - receive UDP header, set UDP flag.
+;    3. Any other packet type - set Unknown flag.
+;
+; If the received packet is a UDP packet then the application can call IPRxData
+; to receive the packet contents.
+;
+; After the packet has been processed by the application it should call IPCleanUp
+; to ensure that any of the incoming data not used by the application is read from
+; the physical layer.
+;
+; !!!! Actually this routine might block if an LCP packet is being received and
+; it is not followed by an IP packet. !!!!
+;
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_IPReceivePacket	
+	bank	IPVars
+	mov	IPFlags,#0	; Initialise the flags.
+	call	@PhyRxTest	; Test if there is a byte in the physical layer.
+	sz			; Is a byte waiting?
+	retp			; No, return.
+	call	@PPPRxData	; Read the PPP header.
+	sz			; Was IP data received.
+	retp			; No, just return.
+	call	@IPRxHeader	; Receive the IP header.
+	bank	IPVars
+	snz			; Is the packet valid?
+	jmp	_IPRxClosePacket	; No, gobble it up. Yum, yum.
+	sb	IPFlags.ICMPPacket	; Is it an ICMP packet?
+	retp				; No, return.
+:ICMP	; Check if it is an echo request.
+	call	@PhyRxByte
+	xor	w,#ICMPEchoRequest	
+	sz			; Is it an echo request?
+	jmp	_IPRxClosePacket	; No, gobble the packet.
+	; Send the ICMP echo reply packet.
+	call	@PhyRxByte	; Ignore the Code field.
+	bank	IPVars
+	mov	IPLength,IPRxLength		; Set the length to the received length.
+	sub	IPLength,#(IPIHL<<2)		; Subtract the header length.
+	mov	IPProtocol,#IPProtocolICMP	; Set the protocol type to ICMP.
+	mov	IPDestAddress1,IPSrcAddress1	; Copy the address.
+	mov	IPDestAddress2,IPSrcAddress2	; !!!! This will only work if 
+	mov	IPDestAddress3,IPSrcAddress3	; IPRxVars and IPVars are in the
+	mov	IPDestAddress4,IPSrcAddress4	; same bank !!!!
+	call	@IPStartPacket	; Send the IP packet header.
+	mov	w,#ICMPEchoReply		; Send the ICMP type.
+	call	@IPTxData
+	mov	w,#0				; Send the code.
+	call	@IPTxData
+	call	@PhyRxByte	; Load the checksum.
+	bank	IPVars
+	mov	IPChecksumh,w
+	DEBUGB
+	bank	IPVars
+	call	@PhyRxByte
+	bank	IPVars
+	mov	IPChecksuml,w
+	DEBUGB
+	bank	IPVars
+	add	IPChecksumh,#8
+	snc
+	inc	IPChecksuml
+	mov	w,IPChecksumh
+	call	@PhyTxByte
+	bank	IPVars
+	mov	w,IPChecksuml
+	call	@PhyTxByte
+	call	@PhyRxByte
+	call	@PhyTxByte			; Send identifier.
+	call	@PhyRxByte
+	call	@PhyTxByte		
+	call	@PhyRxByte
+	call	@PhyTxByte			; Send sequence number.
+	call	@PhyRxByte
+	call	@PhyTxByte		
+	; Send the data from the echo request.
+	bank	IPVars
+	sub	IPLength,#(IPIHL<<2) + ICMPEchoHL
+:data	call	@PhyRxByte
+	call	@PhyTxByte
+	bank	IPVars
+	decsz	IPLength
+	jmp	:data
+
+	call	@PPPClosePacket	; Close the echo reply packet.
+	bank	IPVars
+	setb	IPFlags.echoPacket
+	retp	
+
+_IPRxClosePacket	; Consume a packet by receiving everything up to the closing flag.
+	DEBUGS	_DebugGobble
+:loop	mov	Scratch1,Scratch0
+	call	@GetByte	
+	mov	Scratch0,w
+	xor	w,#PPPFlag
+	sz
+	jmp	:loop
+	csne	Scratch1,#PPPEscape
+	jmp	:loop
+	retp
+
+;===============================================================================
+; UDP subroutines
+;===============================================================================
+
+;-------------------------------------------------------------------------------
+; Subroutine: UDPStartPacket
+;
+; Transmit an IP header followed by a UDP header.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_UDPStartPacket
+	bank	IPVars
+	add	IPLength,#UDPHLength	; Increment the length by the UDP header size.
+	mov	IPProtocol,#IPProtocolUDP	; Set the protocol type to UDP.
+	mov	w,IPLength
+	bank	UDPVars
+	mov	UDPLength,w		; Save the length for later.
+	call	@IPStartPacket
+	bank	UDPVars
+	mov	w,UDPSrcPorth		; Load the source port.
+	call	@PhyTxByte
+	bank	UDPVars
+	mov	w,UDPSrcPortl	
+	call	@PhyTxByte
+	bank	UDPVars
+	mov	w,UDPDestPorth		; Load the destination port.
+	call	@PhyTxByte
+	bank	UDPVars
+	mov	w,UDPDestPortl	
+	call	@PhyTxByte
+	mov	w,#0			; Assume the length < 256
+	call	@PhyTxByte
+	bank	UDPVars
+	mov	w,UDPLength		; Reload the saved lengh.
+	call	@PhyTxByte
+	mov	w,#0			; Send zero for the checksum
+	call	@PhyTxByte
+	mov	w,#0		
+	call	@PhyTxByte
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: UDPRxHeader
+;
+; Receive a UDP header. To make it easy to reply to a packet the source
+; port of the received packet is copied into UDPDestPort and the destination
+; port is copied into UDPSrcPort.
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+;-------------------------------------------------------------------------------
+
+_UDPRxHeader
+	call	@PhyRxByte	; Get the source port.	
+	bank	UDPVars
+	mov	UDPDestPorth,w
+	call	@PhyRxByte	
+	bank	UDPVars
+	mov	UDPDestPortl,w
+	call	@PhyRxByte	; Get the destination port.	
+	bank	UDPVars
+	mov	UDPSrcPorth,w
+	call	@PhyRxByte	
+	bank	UDPVars
+	mov	UDPSrcPortl,w
+	call	@PhyRxByte	; Ignore the high byte of the length.	
+	call	@PhyRxByte	; Get the low byte of the length.
+	bank	UDPVars
+	mov	UDPRxLength,w
+	sub	UDPRxLength,#UDPHLength	; Subtract the length of the header.
+	call	@PhyRxByte	; Ignore the checksum.
+	call	@PhyRxByte
+	retp
+
+;===============================================================================
+; Physical layer routines
+;===============================================================================
+
+;-------------------------------------------------------------------------------
+; Subroutine: PhyRxByte
+;
+; Receive a byte from the physical layer. This routine blocks until a byte is 
+; available. To prevent blocking call PhyRxTest to see if there are any bytes
+; already available in the receive buffer. Any transparency added by the peer
+; is removed here.
+;
+; W on entry: -
+; W on exit : the received byte
+; Variables : Scratch1
+; Bank on exit : serial
+;-------------------------------------------------------------------------------
+
+_IPRxData
+_PhyRxByte
+	call	@GetByte	; Call the UART VP
+	mov	Scratch1,w
+	cjne	Scratch1,#PPPEscape,:done
+	call	@GetByte	; Get the escaped byte
+	xor	w,#PPPXor
+	retp		
+:done	mov	w,Scratch1
+	retp
+
+;-------------------------------------------------------------------------------
+; Subroutine: PhyTxByte
+; Subroutine: PhyNoTransTxByte
+;
+; Send a byte to the physical layer. If the transmit buffer is full then this 
+; routine will block until space is available.
+;
+; PhyTxByte adds transparency while PhyNoTransTxByte doesn't. Every byte between
+; the start and stop flag sequences should be processed for transparency.
+; By default all characters less than $20 as well as the control escape ($7D)
+; and the flag sequence ($7E) is replaced by the control escape followed by the
+; original character xored with $20.
+;
+; W on entry: The byte to transmit
+; W on exit : -
+; Variables : -
+; Bank on exit : serial
+;-------------------------------------------------------------------------------
+
+_IPTxData
+_PhyTxByte
+	call	@PPPTxFCSData
+_PhyTxByteNoFCS
+	DEBUGB
+	mov	Scratch1,w			; Save w
+	cje	Scratch1, #PPPFlag, :trans	; Compare to the flag sequence
+	cje	Scratch1, #PPPEscape,:trans	; Compare to the control escape
+	cjb	Scratch1, #$20, :trans		; Check if < $20
+	mov	w,Scratch1			; Reload byte to transmit
+	jmp	@SendByte			; No transparency issues
+:trans	mov	w, #PPPEscape		; Transmit the control escape
+	call	@SendByte
+	mov	w,Scratch1		; Reload byte to transmit
+	xor	w,#PPPXor		; Xor it.
+_PhyNoTransTxByte
+	jmp	@SendByte	; Call the UART VP
+
+;-------------------------------------------------------------------------------
+; Subroutine: PhyRxTest
+;
+; Test if there is at least one byte available in the physical layer receive 
+; buffer.
+;
+; W on entry: -
+; W on exit : Z is set to 1 if byte available, 0 otherwise
+; Variables : -
+; Bank on exit : serial
+;-------------------------------------------------------------------------------
+
+_PhyRxTest
+	mov	w,fsr
+	bank	serial	; Switch to the UART bank.
+	mov	save_bank,w
+	clz
+	test	rx_ring_cnt	; Test if the ring count is zero
+	snz
+	jmp	:not_set
+	mov	fsr,save_bank
+	setb	z
+	retp
+:not_set
+	mov	fsr,save_bank
+	clrb	z
+	retp	
+
+;===============================================================================
+; Application code
+;===============================================================================
+
+_ResetVector
+	mov	!option,#%11001000	; Disable RTCC rollover.
+	mov	!StatusPort,#%0000	; Set RA in/out directions for status LEDs.
+	mov	StatusPort,#%0000       ; Initialize status LEDs.
+	call	@SerialInit		; Initialize the UART.
+	call	@PPPInit		; Initialize the PPP layer.
+
+	; Application code starts here:
+
+	; Start the PPP connection
+:Start
+IF WIN95 = 1
+	call	@ModemConnect		; Pretend we are a modem.
+ENDIF
+	call	@PPPOpen
+	sb	PPPFlags.linkUp		; Is the link up?
+	jmp	:done			; No.
+
+:loop
+
+	call	@IPReceivePacket
+	bank	IPVars
+	snb	IPFlags.UDPPacket	; Is the packet UDP?
+	jmp	:UDPRx		; Yes, process it.
+
+	bank	PPPVars
+	snb	PPPFlags.linkUp	; Check the link is still up.
+	jmp	:loop
+	jmp	:Start		; If the link is reset then start again.
+
+	call	@PPPClose		; Close the link.
+:done	jmp	:done
+
+
+:UDPRx	call	@UDPRxHeader		; Receive the UDP header.
+	bank	UDPVars
+	cse	UDPSrcPorth,#(DemoPort&$ff00)>>8	; Check the port number.
+	jmp	:gobble
+	cse	UDPSrcPortl,#DemoPort&$00ff	
+	jmp	:gobble
+	; OK the packet is for the right port.
+	call	@IPRxData
+	mov	Scratch0,w
+	cje	Scratch0,#DemoMemDump,:memdump	; Is the command a memory dump?	
+	cje	Scratch0,#DemoMemSet,:set	; Is the command a set memory?	
+	cje	Scratch0,#DemoMemGet,:get	; Is the command a get memory?	
+	cje	Scratch0,#DemoHello,:hello	; Is the command a hello?	
+
+:gobble	call	@IPRxClosePacket
+	jmp	:loop
+
+:memdump	; Dump all of the memory in a 192 byte structure.
+	bank	IPVars
+	mov	IPLength,#192
+	mov	IPDestAddress1,IPSrcAddress1	; Copy the address of the sender
+	mov	IPDestAddress2,IPSrcAddress2
+	mov	IPDestAddress3,IPSrcAddress3
+	mov	IPDestAddress4,IPSrcAddress4
+	call	@UDPStartPacket			; Start the reply packet.
+	clr 	fsr                    
+:all_ram 
+	sb	fsr.4                  
+	setb    fsr.3
+	mov	Scratch0,fsr	; Save the FSR                
+	mov	w,ind                   
+	call	@IPTxData	
+	mov	fsr,Scratch0	; Restore the FSR
+	ijnz	fsr,:all_ram   
+	call	@PPPClosePacket    
+	jmp	:loop
+
+:set	; Read the next byte to get an address and set that address to 
+	; the following byte.
+	call	@IPRxData
+	mov	Scratch0,w	; Save the address.
+	call	@IPRxData	
+	mov	Scratch1,w	; Save the data.
+	mov	FSR,Scratch0	; Use indirect addressing.
+	mov	IND,Scratch1	; Set the register.
+	jmp	:loop
+
+:get	; The next byte contains an address. Reply with a packet containing
+	; the byte at that address.
+	bank	IPVars
+	mov	IPLength,#1
+	mov	IPDestAddress1,IPSrcAddress1	; Copy the address of the sender
+	mov	IPDestAddress2,IPSrcAddress2
+	mov	IPDestAddress3,IPSrcAddress3
+	mov	IPDestAddress4,IPSrcAddress4
+	call	@UDPStartPacket	; Start the reply packet.
+	call	@IPRxData		; Read the address.
+	mov	FSR,w			; Use indirect addressing.
+	mov	w,IND			; Load the byte.
+	call	@IPTxData		; Transmit it.
+	call	@PPPClosePacket	; Finish the packet.
+	jmp	:loop 
+
+:hello 	; Return a hello message.
+	bank	IPVars
+	mov	IPLength,#1
+	mov	IPDestAddress1,IPSrcAddress1	; Copy the address of the sender
+	mov	IPDestAddress2,IPSrcAddress2
+	mov	IPDestAddress3,IPSrcAddress3
+	mov	IPDestAddress4,IPSrcAddress4
+	call	@UDPStartPacket	; Start the reply packet.
+
+	mov	Scratch0,_hello_message
+	page	:sloop
+:sloop	mov	w,Scratch0		
+	mov	m,#(_hello_message>>8)
+	iread
+	call	@IPTxData		
+	inc	Scratch0	
+	mov	w,m		; Load the mode register.
+	test	w
+	snz			; If it is not zero then exit.
+	jmp	:sloop
+
+	call	@PPPClosePacket ; Finish the packet.
+	jmp	:loop
+
+;===============================================================================
+; UART virtual peripheral code to provide the physical layer
+;===============================================================================
+
+	org	$680
+
+SerialISR	bank    serial                  ;switch to serial register bank
+:transmit       clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		stz                             ;set zero flag for test
+		sb	tx_divide.baud_bit      ;every 2^baud_bit interrupt
+		jmp	:receive		;not a transmit cycle
+		test    tx_count                ;are we sending?
+		sz		
+		jmp	:txbit			;yes, send next bit
+		mov	w,tx_ring_cnt		;is tx ring empty?
+		snz
+		jmp	:receive                ;yes, go to :receive
+:txring		mov	w,tx_ring_op		;move one character from the ring to the
+		mov	fsr,w			; transmitter using indirect addressing
+		mov	w,indf
+		bank	serial			;switch back to the uart bank
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+		dec	tx_ring_cnt		;decrement tx ring byte count
+		snz
+		clrb	StatusPort.LEDTr
+		ringadv	tx_ring_op,tx_ring,tx_ring_size	;advance ring pointer
+:txbit		clc                             ;ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+:receive        movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		sz
+		jmp     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit          decsz   rx_divide		;middle of next bit?
+		jmp	:rxdone
+       		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		sz                             	;and skip to end
+		jmp	:rxdone
+		mov	w,rx_ring_cnt		; Is the receive buffer already full?
+		xor	w,#rx_ring_size		; Compare with the buffer size
+		sz
+		jmp	:rx_ok			; Not full
+		setb	flags.rx_over		; Signal receive buffer overflow
+		jmp	:rxdone			; Return to the interrupt handler
+:rx_ok		mov	w,rx_byte		; Move the received byte to the ring bank.
+		bank	uart_rx_ring			
+		mov	uart_temp_isr,w
+		bank	serial
+		mov	w,rx_ring_ip		; Store character in receive buffer
+		mov	fsr,w			; Set indirect address
+		mov	w,uart_temp_isr		; temp must be in same bank as rx ring.
+		mov	indf,w			; Store the received byte
+		bank	serial			; Restore the bank
+		setb	StatusPort.LEDTr	; There is traffic.
+		ringadv	rx_ring_ip,rx_ring,rx_ring_size
+		inc	rx_ring_cnt		; Increment the ring buffer count
+		csne	rx_ring_cnt,#(rx_ring_size-1)	; Is the ring nearly full?
+		setb	cts_pin			; Yes. Drop CTS to stop the DTE.
+:rxdone
+IF DEBUG = 1
+		call	@DebugSerialISR		; Call the debug ISR.
+ENDIF
+		; Update the timer.
+		bank	PPPTimer	
+		incsz	PPPTimer1
+		jmp	:timerDone
+		incsz	PPPTimer2
+		jmp	:timerDone
+		inc	PPPTimer3
+:timerDone
+		mov     w,#-int_period          ;interrupt every 'int_period' clocks
+:end_int	retiw                           ;exit interrupt
+
+;
+; Subroutine - Get byte via serial port
+;
+_GetByte	bank	serial
+:wait		mov	w,rx_ring_cnt		; Get the number of bytes in the rx ring
+		snz				; Is the receive ring empty?
+		jmp	:wait			; Yes, block until not empty
+		mov	w,rx_ring_op		; Load the ring out pointer
+		mov	fsr,w
+		mov	w,indf			; Get character from buffer
+		mov	uart_temp,w		; Save character
+		bank	serial
+		ringadv	rx_ring_op,rx_ring,rx_ring_size	; Advance ring pointer
+		dec	rx_ring_cnt		; Decrement rx char count
+		snz
+		clrb	StatusPort.LEDTr
+		snz				; Is the count zero?
+		clrb	cts_pin			; Yes. Set the CTS pin to restart the DTE.
+		bank	uart_rx_ring
+		mov	w,uart_temp		; Return byte in W
+		retp				
+;
+; Subroutine - Send byte via serial port
+;
+_SendByte	bank    uart_tx_ring
+		setb	StatusPort.LEDTr	; Set the traffic LED.
+		mov	uart_temp,w		; Move the byte to the ring bank.
+		bank	serial
+:wait		csne	tx_ring_cnt,#tx_ring_size	; Compare to the ring size
+		jmp	:wait			; No, block until there is room
+		mov	w,tx_ring_ip		; Get buffer pointer
+		mov	fsr,w
+		mov	w,uart_temp
+		mov	indf,w			; Save temp in the ring
+		bank	serial			; Ensure we are using the serial variables
+		ringadv	tx_ring_ip,tx_ring,tx_ring_size	; Advance ring pointer
+		inc	tx_ring_cnt		; Increment tx char count
+		retp                            ;leave and fix page bits
+
+_SerialInit
+		mov      rb,#%00000000		; The UART uses port B.
+		mov     !rb,#%00010011		; Set RB in/out directions.
+		CLR     FSR                     ;reset all ram starting at 08h
+:zero_ram       SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:zero_ram           ;repeat until done
+		bank	serial
+		clr	rx_ring_cnt		; The receive ring is empty.
+		mov	w,#rx_ring
+		mov	rx_ring_ip,w		; Set the in and out pointers to the start of
+		mov	rx_ring_op,w		; the receive ring.
+		clr	tx_ring_cnt		; The transmit ring is empty.
+		mov	w,#tx_ring
+		mov	tx_ring_ip,w		; Set the in and out pointers to the start of
+		mov	tx_ring_op,w		; the transmit ring.
+		mov     !option,#%10011111      ; Enable rtcc interrupt.
+		retp
+
+
+;-------------------------------------------------------------------------------
+; Subroutine: ModemConnect
+;
+; Pretend that we are a modem so that Windows 95 Dialup Networking will talk to
+; us. The strategy is simple:
+;
+; while there is input
+;    if it starts with ATDT
+;       send CONNECT
+;       exit. PPP layer can start
+;    else
+;       send OK
+;
+; W on entry: -
+; W on exit : -
+; Variables : -
+; Bank on exit : -
+;-------------------------------------------------------------------------------
+
+_ModemConnect
+	call	@GetByte	; Load the first byte to prime the pump.
+	mov	Scratch0,w	; Save the first byte.
+	jmp	:loop
+:ok	mov	w,#'O'			; Send OK.
+	call	@SendByte
+	mov	w,#'K'
+	call	@SendByte
+	mov	w,#13			; Send a carriage return	
+	call	@SendByte 
+:loop	mov	Scratch1,Scratch0	; Shift the bytes.
+	call	@GetByte
+	mov	Scratch0,w		; Save the second byte.
+	cjne	Scratch1,#'A',:loop	; Did we get an 'A'?
+	cjne	Scratch0,#'T',:loop	; Was it followed by a 'T'?
+	call	@GetByte		; Get another byte
+	mov	Scratch0,w
+	cjne	Scratch0,#'D',:ok	; Did we get a 'D'?
+	call	@GetByte		; Get another byte
+	mov	Scratch0,w	
+	cjne	Scratch0,#'T',:ok	; Did we get a 'T'?
+	mov	w,#'C'			; Send CONNECT.
+	call	@SendByte
+	mov	w,#'O'	
+	call	@SendByte
+	mov	w,#'N'	
+	call	@SendByte
+	mov	w,#'N'		
+	call	@SendByte
+	mov	w,#'E'	
+	call	@SendByte
+	mov	w,#'C'	
+	call	@SendByte
+	mov	w,#'T'	
+	call	@SendByte 
+	mov	w,#13			; Send a carriage return	
+	call	@SendByte 
+	retp
+
+
+;===============================================================================
+; Debugging code. A second UART VP is used to send debugging messages to a 
+; terminal. The fastest speed allowed for the debug UART is 38400 (assuming
+; the PPP link is running at 19,200. This allows the same interrupt period to be
+; used for both UARTs. 
+;===============================================================================
+
+IF DEBUG = 1
+; If we are debugging then enable a second UART for transmitting debug info.
+
+debug_rx_pin	EQU     rb.4                    ;UART receive input
+debug_tx_pin	EQU     rb.6                    ;UART transmit output
+
+; *** 38400 baud
+debug_baud_bit		=	3		;for 38400 baud
+debug_start_delay	=	8+4+1		; "    "     "
+debug_int_period	= 	163		; "    "     "
+
+	;	org	$730
+
+;
+; Subroutine - Get byte via serial port
+;
+_DebugGetByte	bank	debug_serial
+	        jnb     debug_rx_flag,$               ;wait till byte is received
+		clrb    debug_rx_flag                 ;reset the receive flag
+		mov     w,debug_rx_byte            ;store byte (copy using W)
+		retp				
+;
+; Subroutine - Send byte via serial port
+;
+_DebugSendByte	bank    debug_serial
+:wait           test    debug_tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     debug_tx_high,w               ; store data byte
+		setb    debug_tx_low.7                ; set up start bit
+		mov     debug_tx_count,#10            ;1 start + 8 data + 1 stop bit
+		RETP                            ;leave and fix page bits
+
+_DebugSendString
+	mov	DebugScratch1,w		;send string at w
+:loop	mov	w,DebugScratch1		;read chr at w
+	mov	m,#(debug_messages>>8)
+	iread
+	call	@DebugSendByte		;not 0, send chr
+	inc	DebugScratch1		;next chr
+	mov	w,m		; Load the mode register.
+	test	w
+	snz			; If it is not zero then exit.
+	jmp	:loop
+	retp
+
+_DebugSendHex
+	bank	debug_serial
+	mov	DebugScratch1,w
+	mov	debug_save_mode,m	; Save the mode register.
+	mov	w,<>DebugScratch1
+	call	@HexDigit
+	mov	w,DebugScratch1		;send second digit
+	call	@HexDigit
+	mov	w,#' '			; Send a space after each pair.
+	call	@DebugSendByte
+	mov	m,debug_save_mode	; Restore the mode register.
+	mov	w,DebugScratch1		; Return with the number in W
+	retp
+_HexDigit and	w,#$F			;read hex chr
+	mov	DebugScratch0,w
+	mov	w,#_hex
+	clc
+	add	w,DebugScratch0
+	mov	m,#(debug_messages>>8)
+	iread
+	call	@DebugSendByte		;send hex chr
+	retp
+
+;
+; Serial ISR for the debug UART
+;
+_DebugSerialISR	bank    debug_serial                  ;switch to serial register bank
+:transmit       clrb    debug_tx_divide.debug_baud_bit      ;clear xmit timing count flag
+		inc     debug_tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     debug_tx_divide.debug_baud_bit      ; every 2^baud_bit interrupt
+		test    debug_tx_count                ;are we sending?
+		JZ      :rxdone                ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      debug_tx_high                 ; and shift to next bit
+		rr      debug_tx_low                  ;
+		dec     debug_tx_count                ;decrement bit counter
+		movb    debug_tx_pin,/debug_tx_low.6        ;output next bit
+
+		retp
+;
+; !!!!! The debug receiver is not used !!!!!!!!
+;
+;:receive        movb    c,debug_rx_pin                ;get current rx bit
+;		test    debug_rx_count                ;currently receiving byte?
+;		jnz     :rxbit                  ;if so, jump ahead
+;		mov     w,#9                    ;in case start, ready 9 bits
+;		sc                              ;skip ahead if not start bit
+;		mov     debug_rx_count,w              ;it is, so renew bit count
+;		mov     debug_rx_divide,#debug_start_delay  ;ready 1.5 bit periods
+;:rxbit          djnz    debug_rx_divide,:rxdone       ;middle of next bit?
+;		setb    debug_rx_divide.debug_baud_bit      ;yes, ready 1 bit period
+;		dec     debug_rx_count                ;last bit?
+;		sz                              ;if not
+;		rr      debug_rx_byte                 ;  then save bit
+;		snz                             ;if so
+;		setb    debug_rx_flag                 ;  then set flag
+:rxdone
+		retp
+
+;	org	$700
+debug_messages	=	$
+_hex            dw      '0123456789ABCDEF'
+_DebugNewline	dw	10,13 + $f00
+_DebugPPPOpen	dw	10,13,'O: ' + $f00
+_DebugPPPSend	dw	10,13,'S: ' + $f00
+_DebugPPPLCPState	dw	10,13,'s: ' + $f00
+_DebugPPPRx	dw	10,13,'R: ' + $f00
+_DebugPPPState	dw	's: ' + $f00
+_DebugPPPWE	dw	10,13,' e: ' + $f00
+_DebugPPPWEState	dw	' state: ' + $f00
+_DebugPPPUnsolicitedAck	dw	10,13,'Ack' + $f00
+_DebugPPPUnknownNego	dw	10,13,'Neg' + $f00
+_DebugPPPIPUP	dw	10,13,'up' + $f00
+_DebugPPPDown	dw	10,13,'down' + $f00
+_DebugPPPNoPeer	dw	10,13,'np' + $f00
+_DebugGobble	dw	10,13,'g' + $f00
+ELSE
+_hex            
+_DebugNewline	
+_DebugPPPOpen	
+_DebugPPPSend	
+_DebugPPPLCPState	
+_DebugPPPRx
+_DebugPPPState	
+_DebugPPPWE	
+_DebugPPPWEState
+_DebugPPPUnsolicitedAck	
+_DebugPPPUnknownNego	
+_DebugPPPIPUP	
+_DebugPPPDown	
+_DebugPPPNoPeer	
+_DebugGobble
+ENDIF

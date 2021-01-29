@@ -1,0 +1,228 @@
+;******************************************************************************
+; Copyright © [05/15/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;
+; Filename:	scaling.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Description:
+;		This code attempts an efficient 8*12 multiplication to perform
+;		the scaling of an 8-bit sine value to a 12-bit value, with a 12
+;		bit scaling constant.
+; Revision:	1.00
+;
+; Date:		August 3, 1999.
+;
+; Part:		SX28AC rev. 5.2
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key 28L software v1.05
+;
+;******************************************************************************
+;	PROGRAM DEFINES
+;******************************************************************************
+ SX28L_assembler; Uncomment this line to use this program with the SX28L assembler
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+IFDEF SX28L_assembler
+		device	SX28L,oscxt4			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+		device	pins28,pages4,banks8		; 28-pin device, 1 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+ENDIF							; option register extend, 8-level stack
+		freq	8_000_000			; default run speed = 50MHz
+		ID	'scaling'			; Version = 1.1
+
+		reset	reset_entry			; JUMP to reset_entry label on reset
+
+;******************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;******************************************************************************
+watch	scale_factor_l,16,udec
+watch	scale_factor_h,8,ubin
+watch	scale_factor_l,8,ubin
+watch	input,8,udec
+watch	input,8,ubin
+watch	answer_l,24,udec
+watch	answer_m,12,udec
+watch	answer_h,8,ubin
+watch	answer_m,8,ubin
+watch	answer_l,8,ubin
+watch	loopcount,8,ubin
+watch	wreg,8,udec
+watch	wreg,8,ubin
+
+;******************************************************************************
+; Pin Definitions (These definitions are for SX DTMF DEMO boards)
+;******************************************************************************
+
+;******************************************************************************
+; Global Variables
+;******************************************************************************
+		org	$8		; Global registers
+
+	flags	ds	1
+	flags2		ds	1	
+	temp		ds	1		; Temporary register
+	temp2		ds	1		; Temporary register
+	
+;******************************************************************************
+; Bank 0 Variables
+;******************************************************************************
+		org	$10
+
+;******************************************************************************
+; Bank 1 Variables
+;******************************************************************************
+		org	$30
+;******************************************************************************
+;	Bank 2 Variables
+;******************************************************************************
+		org     $50                     ;bank3 variables
+;******************************************************************************
+;	Bank 3 Variables
+;******************************************************************************
+		org	$70			
+;*************************************************************
+; Bank 4, 5, 6, 7 (for 64-byte buffer, but can be reused.)
+;*************************************************************
+		org	$90
+		org	$b0
+		org	$d0
+		org	$f0
+math_bank
+	scale_factor_l	ds	1; the lower byte of the 12-bit scaling factor
+	scale_factor_h	ds	1	; the upper nybble of the 12-bit scaling factor
+	input		ds	1	; the 8-bit value to scale
+	answer_l	ds	1
+	answer_m	ds	1
+	answer_h	ds	1
+	loopcount	ds	1
+;************************ Beginning of program space ***************************
+		org	$0			
+;******************************************************************************
+; Interrupt
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+	mov	w,#-163
+	retiw
+;******************************************************************************
+;	End of interrupt service routine
+;******************************************************************************
+reset_entry
+	mov	!option,#$7f
+:loop
+	call	scale_it
+	call	convert_to_int
+	break
+	jmp	:loop
+;******************************************************************************
+SCALE_IT
+; This routine multiplies an 8-bit value by a 12-bit value to return a 12-bit
+; result.  The upper 4 bits of the answer are stored in answer_h, with the lower
+; 4 bits in answer_l.  Scale factor is destroyed and must be reloaded.
+;******************************************************************************
+				;3 cycles on entrance
+	bank	math_bank	;1
+	clr	answer_l	;1
+	clr	answer_m	;1
+	clr	answer_h	;1
+	mov	loopcount,#12	;2
+	mov	w,input		;1
+				;cycles before loop = 10
+
+:loop1	clc
+	snb	scale_factor_l.0;1
+	add	answer_h,w	;1
+	rr	answer_h	;1
+	rr	answer_m	;1
+	rr	answer_l	;1
+	rr	scale_factor_h	;1
+	rr	scale_factor_l	;1
+	decsz	loopcount	;1
+	jmp	:loop1		;3
+				;11 cycles/loop * 11 loops =121 cycles
+				;Final cycle is 12 cycles
+
+	
+	retp			;3
+				; Total number of cycles = 10 + 121 + 12
+				; = 143 cycles for 8 * 12 multiply.
+
+				; 24-bit result present in:
+				; answer_h.7-answer_h.0
+				; answer_m.7-answer_m.0
+				; answer_l.7-answer_l.4
+				; for 12-bit scaled result in upper bits...
+				; answer_h.7-answer_m.4
+
+;******************************************************************************
+CONVERT_TO_INT
+;******************************************************************************
+				;3
+	bank 	math_bank	;1
+	clc			;1
+	rr	answer_h	;1
+	rr	answer_m	;1
+	rr	answer_l	;1
+	rr	answer_h	;1
+	rr	answer_m	;1
+	rr	answer_l	;1
+	rr	answer_h	;1
+	rr	answer_m	;1
+	rr	answer_l	;1
+	rr	answer_h	;1
+	rr	answer_m	;1
+	rr	answer_l	;1
+	retp			;3
+				; Total cycles (including call and return) = 20
+;******************************************************************************
+;******************************************************************************
+
+
+
+
+
+
+
+
+		
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

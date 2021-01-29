@@ -1,0 +1,777 @@
+;******************************************************************************
+; Copyright © [01/07/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;	This program demonstrates the use of a DTMF detection VP in conjunction
+;	with a DTMF generation VP.
+;	
+;
+;       Length:  TBD
+;       Authors: Chris Fogelklou
+;       Written: 99/04/15
+;	Version: 1.00
+;
+;	Revision History
+;
+;******************************************************************************
+SX28L_compiler						; comment this line if using with
+							; SX-Key V 1.04 or lesser
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax,carryx		; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+		device	pins28,pages4,banks8,carryx	; 28-pin device, 4 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ENDIF
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'DFT'				; Version = 4.01
+
+		reset	reset_entry				; JUMP to start label on reset
+;**************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;**************************************************************************
+watch	timer_l,24,udec
+watch	wreg,8,udec
+watch	freq_acc_l,16,uhex
+watch	freq_count_l,16,uhex
+watch	sine_index,8,udec
+watch	sine_value,8,sdec
+watch	cose_value,8,sdec
+watch	sine_acc_l,16,sdec
+watch	cose_acc_l,16,sdec
+watch	answer_l,16,sdec
+watch	wreg,8,sdec
+watch	input,8,sdec
+watch	input2,8,sdec
+watch	input,16,udec
+watch	loop_count,8,udec
+
+;*************************************************************
+; Defs
+;*************************************************************
+;	oldboard
+; Uncomment this oldboard line if your modem demo board is in
+; a 2" by 3" form factor and is not labeled Rev 1.4.
+;*************************************************************
+; Macros
+;*************************************************************
+enable_o	macro	0		; This macro enables the output
+	ifdef	oldboard
+		clrb	in_out
+	else
+		setb	in_out		; switch on the new modem boards.
+	endif
+		clr	flags
+		endm
+
+;**************************************************************************
+; Equates for certain baud rates: 19200 baud
+;**************************************************************************
+baud_bit	=       4                       ;for 19200 baud
+start_delay	=       16+8+1                  ; "    "     "
+int_period	=       163                     ; "    "     "
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+rx_pin          EQU     ra.2                    ;UART receive input
+tx_pin          EQU     ra.3                    ;UART transmit output
+
+;**************************************************************************
+; Global Variables
+;**************************************************************************
+		org	$8		; Global registers
+
+temp		ds	1	; Temporary storage register
+flags		ds	1
+	freq_det_en	equ	flags.0
+	timer_flag	equ	flags.1
+	rx_flag		equ	flags.2
+loopcount	ds	1
+;*************************************************************
+; Bank 1 variables
+;*************************************************************
+		org     $10                   	;bank3 variables
+timers		=	$
+timer_l		ds	1
+timer_m		ds	1
+timer_h		ds	1
+sine_gen_bank	=	$
+freq_acc_l	ds	1
+freq_acc_h	ds	1
+freq_count_l	ds	1
+freq_count_h	ds	1
+;**************************************************************************
+; Bank 2 variables
+;**************************************************************************
+		org	$30
+freq_det_bank
+
+sine_index	ds	1
+sine_value	ds	1
+cose_value	ds	1
+sine_acc_l	ds	1
+sine_acc_h	ds	1
+cose_acc_l	ds	1
+cose_acc_h	ds	1
+
+	math_bank	=	$
+
+	answer_l	ds	1
+	answer_h	ds	1
+	input		ds	1
+	input2		ds	1
+	loop_count	ds	1
+	math_flags	ds	1
+	neg		equ	math_flags.0
+	root_mask	ds	1
+;**************************************************************************
+; Bank 3 variables
+;**************************************************************************
+		org	$50	
+
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+string		ds	1
+byte		ds	1
+hex		ds	1
+
+;**************************************************************************
+; Bank 4 variables
+;**************************************************************************
+		org	$70	
+
+;******************************************************************************
+; Bank 5 Variables
+;******************************************************************************
+		org	$90
+
+PWM_bank		=	$
+
+pwm0_acc		ds	1		; PWM accumulator
+pwm0			ds	1		; current PWM output
+;**************************************************************************
+; Equates for common data comm frequencies (Square wave generator (DTMF Detect)
+;**************************************************************************
+f697_h		equ	$012	; DTMF Frequency
+f697_l		equ	$09d
+f770_h		equ	$014	; DTMF Frequency
+f770_l		equ	$090
+f852_h		equ	$016	; DTMF Frequency
+f852_l		equ	$0c0
+f941_h		equ	$019	; DTMF Frequency
+f941_l		equ	$021
+f1209_h		equ	$020	; DTMF Frequency
+f1209_l		equ	$049
+f1336_h		equ	$023	; DTMF Frequency
+f1336_l		equ	$0ad
+f1477_h		equ	$027	; DTMF Frequency
+f1477_l		equ	$071
+f1633_h		equ	$02b	; DTMF Frequency
+f1633_l		equ	$09c
+f1300_h		equ	$022	; 1300Hz Signifies HIGH data in Bell202 Spec
+f1300_l		equ	$0b7
+f2100_h		equ	$038	; 2100Hz Signifies LOW data in Bell202 Spec
+f2100_l		equ	$015
+
+;**************************************************************************
+; Interrupt
+;**************************************************************************
+	org	0
+	mov	w,>>rc			;1
+	not	w			;1
+	mov	rc,w			;1
+	snb	freq_det_en		;1
+	jmp	@SINE_DETECTION		;3
+;**************************************************************************
+:transmit
+; This is an asynchronous transmitter for RS-232 transmission
+; INPUTS:
+;	divider.divider_bit -	Transmitter/receiver only executes when this bit is = 1
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;**************************************************************************
+		bank	serial
+		clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    tx_count                ;are we sending?
+		JZ      :receive                ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+
+;**************************************************************************
+:receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;**************************************************************************
+		movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		jnz     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ;middle of next bit?
+		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		snz                             ;if so
+		setb    rx_flag                 ;  then set flag
+:rxdone
+;******************************************************************************
+:ISR_DONE
+; This is the end of the interrupt service routine.  Now load 163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;**************************************************************************
+; END ISR
+;**************************************************************************
+;**************************************************************************
+reset_entry
+		call	@init		
+		mov	w,#_hello		; Prompt for HEX value
+		call	@send_string
+		mov	w,#_enter_hex
+		call	@send_string
+		call	@get_hex		; Get upper byte of HEX value
+		bank	sine_gen_bank
+		
+		mov	freq_count_h,w		
+		mov	freq_acc_h,w			; save the upper byte in the input register
+		call	@get_hex		; Get the lower byte of the HEX value
+		bank	sine_gen_bank	
+		mov	freq_count_l,w		; move it into freq_count_l
+		clc				; Multiply freq_count by 5 
+		rl	freq_count_l		; First multiply freq_count by 4
+		rl	freq_count_h
+		jc	input_error		; If the input was too high, say "error"
+		rl	freq_count_l
+		rl	freq_count_h
+		jc	input_error		; If the input was too high, say "error"
+		add	freq_count_l,w		; Add freq_count to freq_count * 4
+		add	freq_count_h,freq_acc_h	; for a result of freq_count * 5
+		jc	input_error		; If the input was too high, say "error"
+		mov	w,#_CR
+		call	@send_string
+
+:loop		mov	fsr,#freq_det_bank	; clear the bank with the sin/cos accumulators
+		call	@clear_bank
+		setb	freq_det_en
+		mov	w,#40
+		call	@delay_n_ms
+		clrb	freq_det_en
+		bank	math_bank
+		mov	input,sine_acc_h
+		mov	input2,sine_acc_h
+		call	@SignedMultiply
+		mov	sine_acc_h,answer_h
+		mov	sine_acc_l,answer_l
+		mov	input,cose_acc_h
+		mov	input2,cose_acc_h
+		call	@SignedMultiply
+		clc
+		mov	w,answer_l
+		add	w,sine_acc_l
+		mov	input,w
+		mov	w,answer_h
+		add	w,sine_acc_h
+		mov	input2,w
+		call	@sq_root
+		mov	answer_l,w
+		clr	answer_h
+		jb	answer_l.7,:max
+		rr	answer_l	; Divide answer by 4
+		rr	answer_l	; Maximum value is 31.
+		mov	w,answer_l
+:max_enter	and	w,#$1f
+		mov	temp,w
+		mov	loopcount,#40
+		mov	w,#13
+		call	@send_byte
+		test	temp
+:star_loop
+		jz	:space_loop
+		mov	w,#'*'
+		call	@send_byte
+		dec	loopcount
+		dec	temp
+		jmp	:star_loop
+:space_loop
+		mov	w,#' '
+		call	@send_byte
+		decsz	loopcount
+		jmp	:space_loop
+		jmp	:loop
+:max
+		mov	w,#$ff
+		jmp	:max_enter
+		
+
+
+input_error
+		mov	w,#_error
+		call	@send_string
+:CR_loop	call	@get_byte
+		cjne	byte,#13,:CR_loop
+		jmp	reset_entry
+org	$200
+;**************************************************************************
+SINE_DETECTION					;4
+		bank	sine_gen_bank		;1
+		clc				;1
+		add	freq_acc_l,freq_count_l	;2
+		add	freq_acc_h,freq_count_h	;2
+		sc				;1
+		jmp	:no_update		;1 15
+
+		bank	freq_det_bank		;1
+		inc	sine_index		;1
+		mov	w,sine_index		;1
+		and	w,#$1f			;1
+		call	sine_table		;7 26
+
+		mov	sine_value,w		;1
+
+		mov	w,#8			;1
+		add	w,sine_index		;1
+		and	w,#$1f			;1
+		call	sine_table		;7
+
+		mov	cose_value,w		;1 38
+:no_update
+		bank	freq_det_bank		;1
+do_sine_ref
+		mov	w,sine_value		;1
+		sb	rc.0			;1
+		jmp	:add_reference		;3
+:sub_reference
+		stc				;1 43
+		sub	sine_acc_l,w		;1
+		clr	w			;1
+		snb	sine_value.7		;1
+		not	w			;1
+		sub	sine_acc_h,w		;1
+		jmp	do_cose_ref		;3 49
+:add_reference
+		clc				;1 44
+		add	sine_acc_l,w		;1
+		clr	w			;1
+		snb	sine_value.7		;1
+		not	w			;1
+		add	sine_acc_h,w		;1 50
+do_cose_ref
+		mov	w,cose_value		;1 52
+		sb	rc.0			;1
+		jmp	:add_reference		;3,1 
+:sub_reference
+		stc				;1 55
+		sub	cose_acc_l,w		;1
+		clr	w			;1
+		snb	cose_value.7		;1
+		not	w			;1
+		sub	cose_acc_h,w		;1
+		jmp	DFT_DONE		;3 63
+:add_reference
+		clc				;1 56
+		add	cose_acc_l,w		;1
+		clr	w			;1
+		snb	cose_value.7		;1
+		not	w			;1
+		add	cose_acc_h,w		;1 64
+
+DFT_DONE					; 65
+do_nothing
+
+;**************************************************************************
+do_timers	bank		timers
+		inc	timer_l
+		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+;**************************************************************************
+	mov	w,#-119		; Return value for easy constants
+	retiw
+	
+;**************************************************************************
+sine_table	;7 cycles
+	clc			;1
+	jmp	pc+w		;3,3 
+	retw	0
+	retw	3
+	retw	6
+	retw	8
+	retw	11
+	retw	12
+	retw	14
+	retw	15
+	retw	15
+	retw	15
+	retw	14
+	retw	12
+	retw	11
+	retw	8
+	retw	6
+	retw	3
+	retw	0
+	retw	-3
+	retw	-6
+	retw	-8
+	retw	-11
+	retw	-12
+	retw	-14
+	retw	-15
+	retw	-15
+	retw	-15
+	retw	-14
+	retw	-12
+	retw	-11
+	retw	-8
+	retw	-6
+	retw	-3
+	jmp	$
+;**************************************************************************
+org	$300
+;**************************************************************************
+; String data (for RS-232 output) and tables needs to be in page $300
+;**************************************************************************
+_hello          dw      13,10,'SX Frequency Detector',0
+_enter_hex	dw	13,10,'Enter a Frequency in hex: ',0		
+_CR		dw	13,10,0	
+_error		dw	13,10,'ERROR: Value is too large.  Must be <= 0x3333',0
+org	$400
+;**************************************************************************
+delay_n_ms
+; This subroutine delays 'w' milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 1ms
+	mov	timer_h,#$0fe
+	mov	timer_l,#$0cd
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;*********************************************************************
+; Initialization Code...
+;*********************************************************************
+init
+		mov	m,#$0e			; Initialize pullups on port A
+		mov	!ra,#%1100		; for I2C
+		mov	m,#$0f
+		mov     ra,#%1000              	; Initialize data latches for
+		mov	!ra,#%0111		; port A.
+		mov     rb,#%11111111          	; Initialize data latches for
+		mov	!rb,#%11111111		; port B.
+		mov	!rc,#%11111110		; port B.
+		call	zero_ram
+		mov     !option,#%00011111      ; enable rtcc interrupt and wreg
+		retp
+;*********************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;*********************************************************
+SignedMultiply
+;*********************************************************
+	mov	input2,w	;1
+	mov	w,#$ff		;1
+	sb	input.7		;1
+	jmp	:input2		;1,3
+	xor	input,w		;1
+	inc	input		;1
+	inc	loop_count	;1;7
+:input2
+	sb	input2.7	;1
+	jmp	:done		;1	
+	xor	input2,w	;1
+	inc	input2		;1
+	inc	loop_count	;1;12
+:done
+	setb	neg		;1
+	sb	loop_count.0	;1
+	clrb	neg		;1
+	clr	loop_count	;1
+	mov	w,input2	;1;17
+	call	Multiply	;87;104
+
+	sb	neg		;1
+	retp			;3
+	mov	w,#$ff		;1
+	xor	answer_h,w	;1
+	xor	answer_l,w	;1
+	inc	answer_l	;1
+	snz			;1
+	inc	answer_h	;1
+	retp			;3;113 cycles worst case
+		
+;*********************************************************
+Multiply ; Multiply W by input
+;*********************************************************
+	setb	loop_count.3	;1
+	clr	answer_l	;1
+	clr	answer_h	;1 ;3
+:loop
+	clc			;1
+	snb	input.0	;1
+	add	answer_h,w	;1
+	rr	answer_h	;1
+	rr	answer_l	;1
+	rr	input		;1
+	decsz	loop_count	;1
+	jmp	:loop		;3	10=looptime (78 on exit)
+				;    	78 + 3 = 81
+	retp			;3	82 + 3 = 84	ALWAYS!!!
+				;	for 16 bit result.
+;**************************************************************************
+clear_bank	; Clears an entire bank of RAM.
+		; To use, first load the FSR with the starting address 
+		; of the bank to clear.
+;**************************************************************************
+:loop
+	clr	indf
+	inc	fsr
+	sb	fsr.4
+	retp
+	jmp	:loop
+;*******************************************************************************************
+; Subroutines 
+;*******************************************************************************************
+;			SQ_ROOT
+;			Routine to take the square root of a 16 bit unsigned number
+;			entry: 	input - low byte of number
+;				input2 - high byte of number
+;			exit:	W register returns 8 bit result
+;*******************************************************************************************
+
+sq_root		mov	root_mask,#$c0		; initialise root_mask
+		mov	w,#$40			; initialise answer
+
+
+:sq1		stc
+		sub	input2,w		; subtract the root develped so far
+		sc				; restore subtraction if carry cleared
+		jmp	:sq5
+
+:sq2		or	w,root_mask		; set the current bit
+		
+:sq3		nop
+		rl	input			; shift number left one position
+		rl	input2
+		rr	root_mask		; picks up ms bit of input2
+		snb	root_mask.7
+		jmp	:sq6
+
+		xor	w,root_mask		; append 01 to the root developed so far
+		sc				; if the lsb of root_mask was shifted into carry,
+		jmp	:sq1			; then we're done. Otherwise loop again
+
+		stc
+		sub	input2,w		; 
+		sc
+		retp
+
+		snz
+		snb	input.7
+		xor	w,#1
+		retp
+
+:sq6		snc
+		retp
+
+		clrb	root_mask.7
+		xor	w,root_mask
+		stc
+		sub	input2,w
+		jmp	:sq2
+
+:sq5		add	input2,w		; carry=0 here
+		jmp	:sq3
+;**************************************************************************
+; Subroutine - Get byte via serial port and echo it back to the serial port
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in rx_byte
+;**************************************************************************
+get_byte     	jnb     rx_flag,$		;wait till byte is received
+		clrb    rx_flag		;reset the receive flag
+		bank	serial
+		mov     byte,rx_byte		;store byte (copy using W)
+						; & fall through to echo char back
+		retp
+;**************************************************************************
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;**************************************************************************
+send_byte    	bank    serial
+
+
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;**************************************************************************
+send_string	bank	serial
+ 		mov     string,w                ;store string address
+:loop        	mov     w,string                ;read next string character
+		mov     m,#3                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ;reset the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		RETP                            ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+;**************************************************************************
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+;**************************************************************************
+uppercase    	csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+;**************************************************************************
+; Subroutine - Output a hex number
+; INPUTS:
+;	w	-	The byte to be output
+;**************************************************************************
+send_hex
+	mov	temp,w
+	swap	wreg
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	mov	w,temp
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	retp
+;**************************************************************************
+get_hex
+;	This routine returns with an 8-bit value in the W and in the hex 
+;	register.  It accepts a hex number from the terminal screen and
+;	returns.
+;**************************************************************************
+	bank	serial
+
+	call	:get_valid_hex
+	mov	w,byte			; send the received (good) byte
+	call	send_byte
+	swap	temp			; put the nybble in the upper nybble of
+	mov	w,temp
+	mov	hex,w			; hex register
+
+	call	:get_valid_hex
+	mov	w,byte			; send the second received byte
+	call	send_byte
+	mov	w,temp			
+	and	w,#$0f
+	or	w,hex
+	mov	hex,w
+	retp
+
+	;*******
+	:get_valid_hex	; Part of get_hex subroutine.
+	;*******
+:gh1
+	clr	temp
+	jnb	rx_flag,$		; get a byte from the terminal
+	clrb	rx_flag
+	mov	byte,rx_byte
+	call	uppercase		; uppercase it.
+:loop
+	mov	w,temp			; get the value at temp (index)
+	call	hex_table
+	xor	w,byte
+	snz				; compare it to the received byte
+	ret
+	inc	temp			; if they are equal, we have the
+	jb	temp.4,:gh1		; upper nybble.  Continue if not.
+	jmp	:loop			
+ret
+;**************************************************************************
+hex_table
+;**************************************************************************
+	add	pc,w
+	retw	'0'
+	retw	'1'
+	retw	'2'
+	retw	'3'
+	retw	'4'
+	retw	'5'
+	retw	'6'
+	retw	'7'
+	retw	'8'
+	retw	'9'
+	retw	'A'
+	retw	'B'
+	retw	'C'
+	retw	'D'
+	retw	'E'
+	retw	'F'

@@ -1,0 +1,1081 @@
+;******************************************************************************
+; Copyright © [01/25/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+ ;Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;
+; Filename:	bell_103_tx.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.00
+;
+; Date:		April 16, 1999.
+;
+; Part:		SX28AC rev. 2.5
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.0
+;
+; Version:	1.04
+;
+; Program Description:	This simple program encodes an outgoing bell103 signal.
+;			This program only creates the answer frequencies, since it
+;			cannot dial out to originate.
+;
+;			To use this program, connect the SX-DTMF-DEMO board to a phone
+;			line and to a PC.  The communications settings are 300,N,8,1.
+;			Now, from a remote BELL103 modem, simply dial the modem's number.
+;			When you here the line ringing on the dialing modem, press a key
+;			in the comm window of the SX-modem-board.  This should force the
+;			modem board off-hook and cause it to send out an answer tone for
+;			3 seconds.  Once the answer tone is sent, the modem board will
+;			begin modulating the state of the RS-232 pin onto the carrier.
+;			If the terminal program is set up correctly, you will be able to
+;			receive the sent characters on the remote modem.
+;
+; Revision History:  	1.0  Wrote the program. It worked.
+;
+;	INPUTS:
+;	Received RS-232 characters on rs-232 rx_pin (ra.1)
+;	OUTPUTS:
+;	Received RS-232 characters on tx_pin (ra.2)
+;	FSK output on PWM_pin
+;	LED flashes (rb.0)
+;
+;	RESOURCES:
+;       Program memory: TBD
+;       Data memory:	TBD
+;       I/O Count:	TBD
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+		device	pins28,pages4,banks8,carryx	; 28-pin device, 1 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'B103TX10'			; Version = 1.0
+
+		reset	reset_entry			; JUMP to reset_entry label on reset
+
+;******************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;******************************************************************************
+watch	fsk_answering,1,ubin
+watch	freq_acc_low,16,udec
+watch	freq_count_low,16,udec
+watch	sine_index,8,udec
+watch	PWM0_out,8,udec
+watch	freq_acc_high,16,uhex
+watch	freq_count_high,8,uhex
+watch	freq_count_low,8,uhex
+watch	freq_count_high2,8,uhex
+watch	freq_count_low2,8,uhex
+watch	byte,1,fstr
+watch	byte,8,udec
+watch	curr_sine,8,sdec
+watch	sine_index,8,sdec
+watch	pwm0_out,8,udec
+watch	pwm0_acc,8,udec
+watch	timer_flag,1,ubin
+watch	timer_l,16,uhex
+watch	temp,8,uhex
+watch	wreg,8,uhex
+watch	fsk_last_trans_1,8,udec
+watch	fsk_last_trans_2,8,udec
+
+watch	fsk_trans_count,8,udec
+watch	fsk_glitch_acc,8,udec
+watch	fsk_high_byte,8,udec
+watch	fsk_average_index,8,udec
+watch	fsk_temp_trans,8,udec
+watch	fsk_processing_required1,1,ubin
+watch	fsk_processing_required2,1,ubin
+
+
+;******************************************************************************
+; Macros (These only required on SX DTMF DEMO board)
+;******************************************************************************
+; oldboard		; Uncomment this if board is not marked rev 1.4 or uses
+			; a DIP SX package.			
+;*************************************************************
+enable_o	macro	0		; This macro enables the output
+;*************************************************************
+ifdef		old_board
+		clrb	in_out		; switch on the new modem boards.
+  else		
+		setb	in_out
+endif
+		clr	flags
+		endm
+;*************************************************************
+
+;**************************************************************************
+; Equates for common data comm frequencies
+;**************************************************************************
+f697_h		equ	$012	; DTMF Frequency
+f697_l		equ	$09d
+
+f770_h		equ	$014	; DTMF Frequency
+f770_l		equ	$090
+
+f852_h		equ	$016	; DTMF Frequency
+f852_l		equ	$0c0
+
+f941_h		equ	$019	; DTMF Frequency
+f941_l		equ	$021
+
+f1209_h		equ	$020	; DTMF Frequency
+f1209_l		equ	$049
+
+f1336_h		equ	$023	; DTMF Frequency
+f1336_l		equ	$0ad
+
+f1477_h		equ	$027	; DTMF Frequency
+f1477_l		equ	$071
+
+f1633_h		equ	$02b	; DTMF Frequency
+f1633_l		equ	$09c
+;******************************************************************************
+; Equates for FSK generation
+;******************************************************************************
+f2225_h		equ	$03b
+f2225_l		equ	$06b
+
+f2025_h		equ	$036
+f2025_l		equ	$014
+
+f1070_h		equ	$01c
+f1070_l		equ	$093
+
+f1270_h		equ	$021
+f1270_l		equ	$0ea
+
+f2100_h		equ	$038	; 2100Hz Signifies LOW data in Bell202 Spec
+f2100_l		equ	$015
+
+;**************************************************************************
+; Equates for certain baud rates: 
+;**************************************************************************
+;baud_bit	=       4                       ;for 19200 baud
+;start_delay	=       16+8+1                  ; "    "     "
+;int_period	=       163                     ; "    "     "
+; *** 2400 baud (for slower baud rates, increase the RTCC prescaler)
+baud_bit	=       7                       ;for 2400 baud
+start_delay	=       128+64+1                ; "    "    "
+fsk_start_delay	=	128+96+1
+int_period	=       163                     ; "    "    "
+;******************************************************************************
+; Pin Definitions (These definitions are for SX DTMF DEMO boards)
+;******************************************************************************
+	PWM_pin		equ	ra.0
+	rx_pin		equ	ra.1		; RS-232 Input pin
+	tx_pin		equ	ra.2		; RS-232 Output pin
+	in_out		equ	ra.3		; Switches between output
+					; and input on SX DTMF DEMO boards.
+	led_pin		equ	rb.0		; Flashes while characters are
+					; being received.
+	cntrl_1		equ	rb.2
+	cntrl_3		equ	rb.5
+	hook		equ	rb.4		; Goes on/off-hook.
+	test_pin	equ	rc.7
+;******************************************************************************
+; Global Variables
+;******************************************************************************
+		org	$8		; Global registers
+
+	flags	ds	1
+		dtmf_gen_en	equ	flags.0	; Signifies whether or not DTMF output is enabled
+		sine_gen_en	equ	flags.1
+		timer_flag	equ	flags.2
+		fsk_tx_en	equ	flags.3
+		fsk_rx_en	equ	flags.4 ; Enables the FSK receiver.
+		rx_flag		equ	flags.5
+		fsk_rx_flag	equ	flags.6
+	temp		ds	1
+	task_switcher	ds	1
+;******************************************************************************
+; Bank 0 Variables
+;******************************************************************************
+		org	$10
+
+sine_gen_bank		=	$
+	freq_acc_low		ds	1	; 16-bit accumulator which decides when to increment the sine wave
+	freq_acc_high		ds	1	; 
+	freq_count_low		ds	1	; 16-bit counter which decides which frequency for the sine wave
+	freq_count_high		ds	1	; freq_count = Frequency * 6.83671552
+	sine_index		ds	1
+	sine_index2		ds	1	; The velocity of the sin wave
+	freq_count_low2		ds	1	; 16-bit counter which decides which frequency for the sine wave
+	freq_count_high2	ds	1	; freq_count = Frequency * 6.83671552
+	freq_acc_high2		ds	1	; 
+	freq_acc_low2		ds	1	; 16-bit accumulator which decides when to increment the sine wave
+	curr_sine		ds	1	; The current value of the imitation sin wave
+	curr_sine2		ds	1	; The current value of the imitation sin wave
+	sine2_temp		ds	1	; This register is used to do a temporary shift/add register
+
+PWM_bank		=	$
+
+pwm0_acc		ds	1		; PWM accumulator
+pwm0_out			ds	1		; current PWM output
+
+;******************************************************************************
+; Bank 1 Variables
+;******************************************************************************
+		org	$30
+timers			=	$
+	timer_l		ds	1
+	timer_h		ds	1
+	
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+rx_count2	ds      1                       ;number of bits received
+rx_divide2	ds      1                       ;receive timing counter
+rx_byte2	ds      1                       ;buffer for incoming byte
+string		ds	1
+byte		ds	1
+
+;******************************************************************************
+;	Bank 2 Variables
+;******************************************************************************
+		org     $50                     ;bank3 variables
+fsk_receive_bank	=	$
+fsk_transmit_bank	=	$
+
+	fsk_last_trans_1	ds	1
+	fsk_last_trans_2	ds	1
+	fsk_trans_count_high	ds	1
+
+	fsk_trans_count		ds	1		; This register counts the number of counts 
+							; between transitions at the pin
+	fsk_rb_past_state 	ds	1		; This register keeps track of the previous 
+							; state of port RB, to watch for transitions
+	fsk_glitch_acc		ds	1
+	fsk_average		ds	1
+	fsk_high_byte		ds	1
+	fsk_average_index	ds	1
+	fsk_temp_trans		ds	1
+
+	fsk_flags		ds	1
+	fsk_answering	equ	fsk_flags.0
+	fsk_tx_bit	equ	fsk_flags.1
+	fsk_rx_bit	equ	fsk_flags.2
+	fsk_processing_required1 equ	fsk_flags.3
+	fsk_processing_required2 equ	fsk_flags.4
+	fsk_rx_bit_last	equ	fsk_flags.5
+
+
+;************************ Beginning of program space ***************************
+;******************************************************************************
+; Interrupt
+		org	$0			; The interrupt Service routine starts at location zero.
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+PWM_output
+		bank	PWM_bank		; Update the PWM pin
+		clc
+		add	PWM0_acc,PWM0_out
+		snc
+		setb	PWM_pin
+		sc
+		clrb	PWM_pin
+;******************************************************************************
+FSK_output
+		jnb	dtmf_gen_en,:dtmf_disabled
+		call	@sine_generator1
+		jmp	:task_switcher
+:dtmf_disabled
+		snb	fsk_tx_en		; If fsk is enabled, decode fsk_tx_bit
+		call	@TRANSMIT_FSK		; into its corresponding frequencies
+		snb	sine_gen_en		; Output the frequencies set by the freq_count registers
+		call	@sine_generator2
+		snb	fsk_rx_en
+		call	@fsk_receive
+:task_switcher
+		inc	task_switcher
+		mov	w,task_switcher
+		and	w,#$07
+		clc
+		jmp	pc+w
+
+		jmp	:fsk_process_1
+
+		jmp	:fsk_process_2
+
+		jmp	:fsk_process_3
+
+		jmp	:fsk_receive
+
+		jmp	do_timers
+
+		jmp	do_timers
+
+		jmp	:transmit
+
+		jmp	:receive
+
+
+:fsk_process_1
+		call	@FSK_RECEIVE_PROCESSING1
+		jmp	do_timers
+:fsk_process_2
+		call	@FSK_RECEIVE_PROCESSING2
+		jmp	do_timers
+:fsk_process_3
+		call	@FSK_RECEIVE_PROCESSING3
+		jmp	do_timers
+		
+;**************************************************************************
+:transmit
+; This is an asynchronous RS-232 transmitter
+; INPUTS:
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;**************************************************************************		bank	serial
+		bank	serial
+		clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    tx_count                ;are we sending?
+		JZ      :receive	        ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+		jmp	do_timers
+;**************************************************************************
+:receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;**************************************************************************
+		bank	serial
+		jmp	do_timers
+		movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		jnz     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ;middle of next bit?
+		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		snz                             ;if so
+		setb    rx_flag                 ;  then set flag
+:rxdone
+		jmp	do_timers
+;**************************************************************************
+:fsk_receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;**************************************************************************
+		bank	fsk_receive_bank
+		movb    c,fsk_rx_bit            ;get current rx bit
+		bank	serial
+		test    rx_count2                ;currently receiving byte?
+		jnz     :rxbit2                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count2,w              ;it is, so renew bit count
+		mov     rx_divide2,#fsk_start_delay  ;ready 1.5 bit periods
+:rxbit2		djnz    rx_divide2,:rxdone2       ;middle of next bit?
+		setb    rx_divide2.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count2                ;last bit?
+		sz                              ;if not
+		rr      rx_byte2                 ;  then save bit
+		snz                             ;if so
+		setb    fsk_rx_flag                 ;  then set flag
+:rxdone2
+		jmp	do_timers
+;**************************************************************************
+do_timers
+		bank	timers			; Update the timers
+		inc	timer_l
+		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+		setb	led_pin
+		sb	timer_h.6
+		clrb	led_pin
+;******************************************************************************
+:ISR_DONE
+; This is the end of the interrupt service routine.  Now load 163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;******************************************************************************
+; End of the Interrupt Service Routine
+;******************************************************************************
+
+;******************************************************************************
+reset_entry
+; Program Starts Here on Power Up
+;******************************************************************************
+
+		call	@init
+
+		mov	!option,#%00011111	; enable wreg and rtcc interrupt
+		mov	w,#_hello
+		call	@send_string
+		jb	rx_pin,$
+		enable_o			
+
+		setb	hook			; pick up the line
+
+		bank	fsk_receive_bank
+		setb	fsk_answering		; enable answer frequencies
+		setb	cntrl_1
+		clrb	cntrl_3	
+		clrb	hook
+
+main
+		call	@answer_tone
+
+		bank	fsk_transmit_bank
+		clr	flags
+		setb	fsk_tx_bit
+		setb	fsk_tx_en
+		setb	sine_gen_en
+		setb	fsk_answering
+		mov	w,#255
+		call	@delay_10n_ms
+		mov	w,#255
+		call	@delay_10n_ms
+		bank	fsk_transmit_bank
+		setb	fsk_rx_en
+:loop
+		bank	fsk_transmit_bank
+		movb	fsk_tx_bit,rx_pin	; move the rs-232 pin to the fsk_tx_bit
+		jb	fsk_rx_flag,:test
+		jmp	:loop			; jump here forever (ISR does all the work)
+
+:test
+		bank	serial
+		clrb	fsk_rx_flag
+		mov	byte,rx_byte2
+		call	@send_byte
+		jmp	:loop
+main_2
+		call	@get_byte
+		call	@uppercase
+		stc
+		cje	byte,#'D',Dial
+		stc
+		cje	byte,#'A',Answer
+		jmp	main_2
+Dial
+	;******************************************************************
+	; Go off-hook
+	;******************************************************************
+		setb	hook				; pick up the line
+		clrb	cntrl_1
+		setb	cntrl_3
+		clr	flags
+		setb	sine_gen_en
+		setb	fsk_tx_en
+		bank	fsk_receive_bank
+				
+:dial_loop	call	@get_byte			; wait for an input character
+		stc
+		cje	byte,#$1b,:originate_mode
+		call	@uppercase
+		call	@digit_2_index			; convert the ascii digit to an 
+							; index value
+		jb	wreg.4,:dial_loop		; if wreg = 16, value did not match table.
+		call	@load_frequencies		; load the frequency registers
+		call	@dial_it			; dial the number for 60ms and return.
+		jmp	:dial_loop
+:originate_mode
+		bank	fsk_receive_bank
+		clrb	fsk_answering
+		call	@disable_o
+		setb	fsk_rx_en
+		clrb	dtmf_gen_en
+		IFDEF	IDC
+		setb	cntrl_1
+		clrb	cntrl_3
+		ENDIF
+:loop
+		bank	fsk_receive_bank		
+		movb	tx_pin,fsk_rx_bit
+		jmp	:loop
+
+Answer
+org	$200
+
+;******************************************************************************
+FSK_RECEIVE
+;**************************************************************************
+		bank	fsk_receive_bank	; switch to fsk_receive_bank of RAM
+
+		inc	fsk_trans_count		; Increment the transition count
+		snz
+		inc	fsk_trans_count_high
+		clc
+		mov	w,#$02
+		and	w,rb
+		sz
+		stc
+		rl	fsk_rb_past_state
+		and	w,fsk_rb_past_state
+		sz
+		retp		
+		setb	fsk_processing_required1
+		mov	fsk_temp_trans,fsk_trans_count
+		clc
+		rr	fsk_trans_count_high
+		rr	fsk_temp_trans
+		clr	fsk_trans_count
+		clr	fsk_trans_count_high
+		retp
+
+
+
+;**************************************************************************
+FSK_RECEIVE_PROCESSING1	; This code is not very speed critical and can
+			; run every so often in the ISR.
+;**************************************************************************
+
+		bank	fsk_receive_bank
+		sb	fsk_processing_required1
+		retp
+		clrb	fsk_processing_required1
+		mov	w,#$01
+		and	w,fsk_average_index
+		mov	fsr,w
+		mov	w,#fsk_last_trans_1
+		clc
+		add	fsr,w
+		mov	w,fsk_temp_trans
+		mov	indf,w
+		inc	fsk_average_index
+		setb	fsk_processing_required2
+		retp
+
+
+;**************************************************************************
+FSK_RECEIVE_PROCESSING2	; This code is not very speed critical and can
+			; run every so often in the ISR.
+;**************************************************************************
+		bank	fsk_receive_bank		;1
+		sb	fsk_processing_required2	;1
+		retp					;1
+		clrb	fsk_processing_required2	;1
+		clr	fsk_high_byte			;1
+		mov	w,fsk_last_trans_1		;1
+		clc					;1
+		add	w,fsk_last_trans_2		;1
+		rr	wreg				;1
+		clc					;1
+		mov	fsk_high_byte,w			;1
+		mov	w,#-126				;1
+		sb	fsk_answering			;1
+		mov	w,#-77				;1
+		clc					;1
+		add	w,fsk_high_byte			;1
+		setb	fsk_rx_bit			;1
+		snc					;1
+		clrb	fsk_rx_bit			;1;50
+							;3;53
+		retp
+;**************************************************************************
+FSK_RECEIVE_PROCESSING3
+
+		retp
+		bank	fsk_receive_bank
+		sb	fsk_rx_bit
+		jmp	:rx_bit_low
+:rx_bit_high
+		snb	fsk_rx_bit_last
+		retp
+		setb	fsk_rx_bit_last
+		mov	w,#121
+		sb	fsk_answering
+		mov	w,#69
+		jmp	:hysterises
+:rx_bit_low
+		sb	fsk_rx_bit_last
+		retp
+		clrb	fsk_rx_bit_last
+		mov	w,#144
+		sb	fsk_answering
+		mov	w,#76
+:hysterises
+		mov	fsk_last_trans_1,w
+		mov	fsk_last_trans_2,w
+		retp
+;**************************************************************************
+TRANSMIT_FSK
+;**************************************************************************
+		bank	fsk_transmit_bank
+		jb	fsk_answering,transmit_answer_tones
+transmit_originate_tones
+		jnb	fsk_tx_bit,:low_freq
+:high_freq
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f1270_h
+		mov	freq_count_low2,#f1270_l
+		retp
+:low_freq	
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f1070_h
+		mov	freq_count_low2,#f1070_l
+		retp
+transmit_answer_tones
+		jnb	fsk_tx_bit,:low_freq
+:high_freq
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f2225_h
+		mov	freq_count_low2,#f2225_l
+		retp
+:low_freq	
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f2025_h
+		mov	freq_count_low2,#f2025_l
+		retp
+;**************************************************************************
+answer_tone
+;**************************************************************************
+		bank	sine_gen_bank		; send out the answer tone for 3 seconds
+		clr	curr_sine
+		mov	freq_count_high2,#f2100_h 
+		mov	freq_count_low2,#f2100_l
+		setb	sine_gen_en		; enable the FSK transmitter
+		mov	w,#255
+		call	@delay_10n_ms
+		mov	w,#45
+		call	@delay_10n_ms
+		retp
+;**************************************************************************
+org	$300
+;**************************************************************************
+; String data (for RS-232 output) and tables
+;**************************************************************************
+_hello          dw      13,10,13,10,'DTMF Transmit V. 1.4',13,10,13,10,0
+_instructions	dw	'-Press D to begin dialing.',13,10,'-Type the number to dial.',13,10,0
+_instructions2	dw	'-Numbers will be dialed as you type.',13,10,13,10,0
+
+org	$400	; Miscellaneous subroutines
+;**************************************************************************
+delay_10n_ms
+; This subroutine delays 'w'*10 milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after 10 * n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 10ms
+	mov	timer_h,#$0f4
+	mov	timer_l,#$004
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;**************************************************************************
+delay_n_ms
+; This subroutine delays 'w' milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 1ms
+	mov	timer_h,#$0fe
+	mov	timer_l,#$0cd
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;**************************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;**************************************************************************
+init
+;**************************************************************************
+		mov	m,#$0c			; Initialize SX.
+		mov	!rb,#%11111111		; enable Schmidt trigger on rb1 (for FSK receive)
+
+		mov	m,#$0f			
+		mov	 ra,#%0110		; init ra
+		mov	!ra,#%0010		; ra0-1 = input, ra2-3 = output
+		mov	 rb,#%00000000		; init rb
+		mov	!rb,#%11001010		; rb1 = FSK input, rb0 = output for LED,rb5 = hook
+		mov	!rc,#%01111111		; rb1 = FSK input, rb0 = output for LED,rb5 = hook
+		setb	hook			; go on hook.
+		setb	led_pin			; turn on LED
+		clr	flags			; Clear all flags
+		call	zero_ram
+		retp
+;**************************************************************************
+; Subroutine - Get byte via serial port and echo it back to the serial port
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in rx_byte
+;**************************************************************************
+get_byte     	jnb     rx_flag,$		;wait till byte is received
+		clrb    rx_flag		;reset the receive flag
+		bank	serial
+		mov     byte,rx_byte		;store byte (copy using W)
+						; & fall through to echo char back
+;**************************************************************************
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;**************************************************************************
+send_byte    	bank    serial
+
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+		RETP                            ;leave and fix page bits
+
+;**************************************************************************
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;**************************************************************************
+send_string	bank	serial
+ 		mov     string,w                ;store string address
+:loop        	mov     w,string                ;read next string character
+		mov     m,#3                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ;reset the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		RETP                            ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+;**************************************************************************
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+; OUTPUTS:
+;	byte	-	The uppercase byte
+;**************************************************************************
+uppercase    	csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+; Subroutine - Disable the outputs
+; Load DC value into PWM and disable the output switch.
+;**************************************************************************
+disable_o	clrb	in_out		; set the analogue switch for
+		bank	PWM_bank	; input mode.
+		mov	pwm0_out,#128	; put 2.5V DC on PWM output pin
+		retp
+;**************************************************************************
+org	$600			; These subroutines are on page 3.
+;**************************************************************************
+; DTMF transmit functions/subroutines
+;**************************************************************************
+;**************************************************************************
+DTMF_TABLE	; DTMF tone constants
+; This routine returns with the constant used for each of the frequency
+; detectors.
+; INPUT:	w	-	Index into the table (0-15 value)
+; OUTPUT:	w	-	Constant at that index
+;**************************************************************************
+		clc
+		jmp	PC+w
+		retw	f697_l
+		retw	f697_h			
+		retw	f770_l
+		retw	f770_h
+		retw	f852_l
+		retw	f852_h	
+		retw	f941_l
+		retw	f941_h
+		retw	f1209_l
+		retw	f1209_h
+		retw	f1336_l
+		retw	f1336_h
+		retw	f1477_l
+		retw	f1477_h
+		retw	f1633_l
+		retw	f1633_h
+;**************************************************************************
+ASCII_TABLE	; Ascii value at index (0-15)
+; INPUT:	w	-	Index into the table (0-15 value)
+; OUTPUT:	w	-	Constant at that index
+;**************************************************************************
+		clc
+		jmp	PC+w
+		retw	'1'
+		retw	'2'			
+		retw	'3'
+		retw	'A'
+		retw	'4'
+		retw	'5'	
+		retw	'6'
+		retw	'B'
+		retw	'7'
+		retw	'8'
+		retw	'9'
+		retw	'C'
+		retw	'*'
+		retw	'0'
+		retw	'#'
+		retw	'D'
+;**************************************************************************
+index_2_digit
+; This subroutine converts a digit from 0-9 or a '*' or a '#' to a table 
+; lookup index which can be used by the load_frequencies subroutine.  To use
+; this routine, pass it a value in the 'byte' register.  No invalid digits
+; are used. (A, B, C, or D)
+;**************************************************************************
+		call	ASCII_TABLE
+		retp
+;**************************************************************************
+digit_2_index
+; This subroutine converts a digit from 0-9 or a '*' or a '#' to a table 
+; lookup index which can be used by the load_frequencies subroutine.  To use
+; this routine, pass it a value in the 'byte' register.  No invalid digits
+; are used. (A, B, C, or D)
+;**************************************************************************
+		bank	serial
+		clr	temp
+:loop
+		mov	w,temp
+		call	ASCII_TABLE
+		xor	w,byte
+		jz	:done
+		inc	temp
+		jb	temp.4,:done
+		jmp	:loop
+
+:done		mov	w,temp
+		retp
+		
+;**************************************************************************
+load_frequencies
+; This subroutine loads the frequencies using a table lookup approach.
+; The index into the table is passed in the byte register.  The DTMF table
+; must be in the range of $400 to $500.
+;**************************************************************************
+		mov	temp,w
+		bank	sine_gen_bank
+
+		mov	w,>>temp
+		and	w,#%00000110
+		call	DTMF_TABLE
+		mov	freq_count_low,w
+
+		mov	w,>>temp
+		and	w,#%00000110
+		inc	wreg
+		call	DTMF_TABLE
+		mov	freq_count_high,w
+
+		rl	temp
+		setb	temp.3
+		mov	w,temp
+		and	w,#%00001110
+		mov	temp,w
+		call	DTMF_TABLE
+		mov	freq_count_low2,w
+
+		mov	w,temp
+		inc	wreg
+		call	DTMF_TABLE
+		mov	freq_count_high2,w
+		retp		
+		
+;**************************************************************************
+dial_it		; This subroutine puts out whatever frequencies were loaded
+		; for 1000ms, and then stops outputting the frequencies.
+;**************************************************************************
+		bank	sine_gen_bank
+		clr	sine_index
+		clr	sine_index2
+		enable_o 			; enable the output
+		mov	w,#3
+		call	@delay_10n_ms		; delay 30ms
+		setb	dtmf_gen_en
+		mov	w,#10
+		call	@delay_10n_ms		; delay 100ms
+		clrb	dtmf_gen_en
+		call	@disable_o		; now disable the outputs
+:end_dial_it	retp
+;**************************************************************************
+sine_generator1				;(Part of interrupt service routine)
+; This routine generates a synthetic sine wave with values ranging
+; from -32 to 32.  Frequency is specified by the counter.  To set the
+; frequency, put this value into the 16-bit freq_count register:
+; freq_count = FREQUENCY * 6.83671552 (@50MHz)
+;**************************************************************************
+		bank	sine_gen_bank
+		
+		clc
+		add	freq_acc_low,freq_count_low
+		add	freq_acc_high,freq_count_high
+		sc
+		jmp	:no_change
+		inc	sine_index
+		mov	w,sine_index
+		and	w,#$1f
+		call	sine_table
+	
+		mov	curr_sine,w		;1		; add the velocity to sin
+
+
+:no_change
+
+;**************************************************************************
+sine_generator2						;(Part of interrupt service routine)
+; This routine generates a synthetic sine wave with values ranging
+; from -32 to 32.  Frequency is specified by the counter.  To set the
+; frequency, put this value into the 16-bit freq_count register:
+; freq_count = FREQUENCY * 6.83671552 (@50MHz)
+;**************************************************************************
+		bank	sine_gen_bank
+		clc
+		add	freq_acc_low2,freq_count_low2
+		add	freq_acc_high2,freq_count_high2
+		sc
+		jmp	:no_change
+		inc	sine_index2
+		mov	w,sine_index2
+		and	w,#$1f
+		call	sine_table
+		mov	curr_sine2,w
+:no_change
+		mov	pwm0_out,curr_sine2			; mov sin2 into pwm0
+		mov	sine2_temp,w			; mov the high_frequency sin wave's current value
+		clc					 ; into a temporary register
+		snb	sine2_temp.7			; divide temporary register by four by shifting right
+		stc					 ; (for result = (0.25)(sin2))
+		rr	sine2_temp
+		clc
+		snb	sine2_temp.7
+		stc
+		mov	w,>>sine2_temp
+		clc
+		add	pwm0_out,w				; (1.25)(sin2) = sin2 + (0.25)(sin2)
+		add	pwm0_out,curr_sine			; add the value of SIN into the PWM output
+		add	pwm0_out,#128			; for result = pwm0 = 1.25*sin2 + 1*sin
+		retp					; return with page bits intact
+;******************************************************************************
+sine_table
+; The values in this table can be changed to increase/decrease the amplitude of
+; the output sine wave.
+;******************************************************************************
+	clc
+	jmp	pc+w
+	retw	0
+	retw	6
+	retw	12
+	retw	17
+	retw	22
+	retw	26
+	retw	29
+	retw	30
+	retw	31
+	retw	30
+	retw	29
+	retw	26
+	retw	22
+	retw	17
+	retw	12
+	retw	6
+	retw	0
+	retw	-6
+	retw	-12
+	retw	-17
+	retw	-22
+	retw	-26
+	retw	-29
+	retw	-30
+	retw	-31
+	retw	-30
+	retw	-29
+	retw	-26
+	retw	-22
+	retw	-17
+	retw	-12
+	retw	-6
+;**************************************************************************
+;******************************************************************************
+;        Copyright © 1998 Scenix Semiconductor, Inc. All rights
+;        reserved.
+;        
+;        Scenix Semiconductor, Inc. assumes no responsibility or liability for
+;        the use of this [product, application, software, any of these products].
+;        
+;        Scenix Semiconductor conveys no license, implicitly or otherwise, under
+;        any intellectual property rights.
+;        Information contained in this publication regarding (e.g.: application,
+;        implementation) and the like is intended through suggestion only and may
+;        be superseded by updates. Scenix Semiconductor makes no representation
+;        or warranties with respect to the accuracy or use of these information,
+;        or infringement of patents arising from such use or otherwise.
+;        
+;        Scenix Semiconductor products are not authorized for use in life support
+;        systems or under conditions where failure of the product would endanger
+;        the life or safety of the user, except when prior written approval is
+;        obtained from Scenix Semiconductor.
+;******************************************************************************

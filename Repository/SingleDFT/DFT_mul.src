@@ -1,0 +1,457 @@
+;******************************************************************************
+; Copyright © [01/07/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;	This program demonstrates the use of a DTMF detection VP in conjunction
+;	with a DTMF generation VP.
+;	
+;
+;       Length:  TBD
+;       Authors: Chris Fogelklou
+;       Written: 99/04/15
+;	Version: 1.00
+;
+;	Revision History
+;
+;******************************************************************************
+SX28L_compiler						; comment this line if using with
+							; SX-Key V 1.04 or lesser
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax,carryx		; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+		device	pins28,pages4,banks8,carryx	; 28-pin device, 4 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ENDIF
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'DFT'				; Version = 4.01
+
+		reset	reset_entry				; JUMP to start label on reset
+;**************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;**************************************************************************
+watch	timer_l,24,udec
+watch	wreg,8,udec
+watch	freq_acc_l,16,uhex
+watch	freq_count_l,16,uhex
+watch	sine_index,8,udec
+watch	sine_value,8,sdec
+watch	cose_value,8,sdec
+watch	sine_acc_l,16,sdec
+watch	cose_acc_l,16,sdec
+watch	answer_l,16,sdec
+watch	wreg,8,sdec
+watch	input,8,sdec
+watch	input2,8,sdec
+watch	loop_count,8,udec
+
+
+;*************************************************************
+; Defs
+;*************************************************************
+;	oldboard
+; Uncomment this oldboard line if your modem demo board is in
+; a 2" by 3" form factor and is not labeled Rev 1.4.
+;*************************************************************
+; Macros
+;*************************************************************
+enable_o	macro	0		; This macro enables the output
+	ifdef	oldboard
+		clrb	in_out
+	else
+		setb	in_out		; switch on the new modem boards.
+	endif
+		clr	flags
+		endm
+
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+;PWM_pin		equ	ra.0
+PWM_pin		equ	rb.4
+
+rx_pin		equ	ra.1
+tx_pin		equ	ra.2
+in_out		equ	ra.3
+
+led_pin		equ	rb.0
+cntrl_3		equ	rb.5
+hook		equ	rb.4
+
+;**************************************************************************
+; Global Variables
+;**************************************************************************
+		org	$8		; Global registers
+
+temp		ds	1	; Temporary storage register
+flags		ds	1
+	freq_det_en	equ	flags.0
+	timer_flag	equ	flags.1
+	rx_flag		equ	flags.2
+;*************************************************************
+; Bank 1 variables
+;*************************************************************
+		org     $10                   	;bank3 variables
+timers		=	$
+timer_l		ds	1
+timer_m		ds	1
+timer_h		ds	1
+sine_gen_bank	=	$
+freq_acc_l	ds	1
+freq_acc_h	ds	1
+freq_count_l	ds	1
+freq_count_h	ds	1
+;**************************************************************************
+; Bank 2 variables
+;**************************************************************************
+		org	$30
+freq_det_bank
+
+sine_index	ds	1
+sine_value	ds	1
+cose_value	ds	1
+sine_acc_l	ds	1
+sine_acc_h	ds	1
+cose_acc_l	ds	1
+cose_acc_h	ds	1
+
+math_bank	=	$
+
+answer_l	ds	1
+answer_h	ds	1
+input		ds	1
+input2		ds	1
+loop_count	ds	1
+math_flags	ds	1
+neg		equ	math_flags.0
+
+;**************************************************************************
+; Bank 3 variables
+;**************************************************************************
+		org	$50	
+
+;**************************************************************************
+; Bank 4 variables
+;**************************************************************************
+		org	$70	
+
+;******************************************************************************
+; Bank 5 Variables
+;******************************************************************************
+		org	$90
+
+PWM_bank		=	$
+
+pwm0_acc		ds	1		; PWM accumulator
+pwm0			ds	1		; current PWM output
+;**************************************************************************
+; Equates for common data comm frequencies (Square wave generator (DTMF Detect)
+;**************************************************************************
+f697_h		equ	$012	; DTMF Frequency
+f697_l		equ	$09d
+
+f770_h		equ	$014	; DTMF Frequency
+f770_l		equ	$090
+
+f852_h		equ	$016	; DTMF Frequency
+f852_l		equ	$0c0
+
+f941_h		equ	$019	; DTMF Frequency
+f941_l		equ	$021
+
+f1209_h		equ	$020	; DTMF Frequency
+f1209_l		equ	$049
+
+f1336_h		equ	$023	; DTMF Frequency
+f1336_l		equ	$0ad
+
+f1477_h		equ	$027	; DTMF Frequency
+f1477_l		equ	$071
+
+f1633_h		equ	$02b	; DTMF Frequency
+f1633_l		equ	$09c
+
+f1300_h		equ	$022	; 1300Hz Signifies HIGH data in Bell202 Spec
+f1300_l		equ	$0b7
+
+f2100_h		equ	$038	; 2100Hz Signifies LOW data in Bell202 Spec
+f2100_l		equ	$015
+
+;**************************************************************************
+; Interrupt
+;**************************************************************************
+		org	0
+;**************************************************************************
+PWM_OUTPUT
+; This outputs the current value of pwm0 to the PWM_pin.  This generates
+; an analog voltage at PWM_pin after filtering
+;**************************************************************************
+;		bank	PWM_bank
+;		add	pwm0_acc,pwm0			; add the PWM output to the accumulator
+;		snc				
+;		jmp	:carry				; if there was no carry, then clear 
+;							; the PWM_pin
+;		clrb	PWM_pin
+;		jmp	PWM_out			 
+;:carry
+;		setb	PWM_pin				; otherwise set the PWM_pin
+PWM_out
+;**************************************************************************
+SINE_GENERATION
+		mov	w,<<rc
+		not	w
+		mov	rc,w
+		jnb	freq_det_en,DFT_DONE
+		bank	sine_gen_bank
+		clc
+		add	freq_acc_l,freq_count_l
+		add	freq_acc_h,freq_count_h
+		jnc	:no_update
+		bank	freq_det_bank
+		inc	sine_index
+		mov	w,sine_index
+		and	w,#$1f
+		call	@sine_table
+
+		mov	sine_value,w
+		bank	freq_det_bank
+
+		mov	w,#8
+		add	w,sine_index
+		and	w,#$1f
+		call	@sine_table
+
+		mov	cose_value,w
+:no_update
+
+do_sine_ref
+		bank	freq_det_bank
+		mov	w,sine_value
+		jnb	rc.3,:add_reference
+:sub_reference
+		stc
+		sub	sine_acc_l,w
+		clr	w
+		snb	sine_value.7
+		not	w
+		sub	sine_acc_h,w
+		jmp	do_cose_ref
+:add_reference
+		clc
+		add	sine_acc_l,w
+		clr	w
+		snb	sine_value.7
+		not	w
+		add	sine_acc_h,w
+do_cose_ref
+		mov	w,cose_value
+		jnb	rc.3,:add_reference
+:sub_reference
+		stc
+		sub	cose_acc_l,w
+		clr	w
+		snb	cose_value.7
+		not	w
+		sub	cose_acc_h,w
+		jmp	DFT_DONE
+:add_reference
+		clc
+		add	cose_acc_l,w
+		clr	w
+		snb	cose_value.7
+		not	w
+		add	cose_acc_h,w
+
+DFT_DONE
+do_nothing
+
+;**************************************************************************
+do_timers	bank		timers
+		inc	timer_l
+		snz
+;		inc	timer_m
+;		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+;**************************************************************************
+; END ISR
+;**************************************************************************
+		mov	w,#-163
+		retiw
+;**************************************************************************
+reset_entry
+		call	@init		
+:loop
+		call	@zero_ram
+		bank	sine_gen_bank
+		mov	freq_count_l,#f1477_l
+		mov	freq_count_h,#f1477_h
+		setb	freq_det_en
+		mov	w,#20
+		call	@delay_n_ms
+		clrb	freq_det_en
+		bank	freq_det_bank
+		mov	input,sine_acc_h
+		call	SignedMultiply
+		mov	sine_acc_h,answer_h
+		mov	sine_acc_l,answer_l
+		mov	input,cose_acc_l
+		call	SignedMultiply		
+		mov	cose_acc_h,answer_h
+		mov	cose_acc_l,answer_l
+		break
+		jmp	:loop
+
+;*********************************************************
+SignedMultiply
+;*********************************************************
+	mov	input2,w	;1
+	mov	w,#$ff		;1
+	sb	input.7		;1
+	jmp	:input2		;1,3
+	xor	input,w		;1
+	inc	input		;1
+	inc	loop_count	;1;7
+:input2
+	sb	input2.7	;1
+	jmp	:done		;1	
+	xor	input2,w	;1
+	inc	input2		;1
+	inc	loop_count	;1;12
+:done
+	setb	neg		;1
+	sb	loop_count.0	;1
+	clrb	neg		;1
+	clr	loop_count	;1
+	mov	w,input2	;1;17
+	call	Multiply	;87;104
+
+	sb	neg		;1
+	retp			;3
+	mov	w,#$ff		;1
+	xor	answer_h,w	;1
+	xor	answer_l,w	;1
+	inc	answer_l	;1
+	snz			;1
+	inc	answer_h	;1
+	retp			;3;113 cycles worst case
+		
+;*********************************************************
+Multiply ; Multiply W by input
+;*********************************************************
+	setb	loop_count.3	;1
+	clr	answer_l	;1
+	clr	answer_h	;1 ;3
+:loop
+	clc			;1
+	snb	input.0	;1
+	add	answer_h,w	;1
+	rr	answer_h	;1
+	rr	answer_l	;1
+	rr	input		;1
+	decsz	loop_count	;1
+	jmp	:loop		;3	10=looptime (78 on exit)
+				;    	78 + 3 = 81
+	retp			;3	82 + 3 = 84	ALWAYS!!!
+				;	for 16 bit result.org	$200
+;**************************************************************************
+sine_table
+	call	_sine_table
+	retp
+
+;**************************************************************************
+	_sine_table
+	clc
+	jmp	pc+w
+	retw	0
+	retw	3
+	retw	6
+	retw	8
+	retw	11
+	retw	12
+	retw	14
+	retw	15
+	retw	15
+	retw	15
+	retw	14
+	retw	12
+	retw	11
+	retw	8
+	retw	6
+	retw	3
+	retw	0
+	retw	-3
+	retw	-6
+	retw	-8
+	retw	-11
+	retw	-12
+	retw	-14
+	retw	-15
+	retw	-15
+	retw	-15
+	retw	-14
+	retw	-12
+	retw	-11
+	retw	-8
+	retw	-6
+	retw	-3
+	jmp	$
+;**************************************************************************
+org	$400
+;**************************************************************************
+delay_n_ms
+; This subroutine delays 'w' milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 1ms
+	mov	timer_h,#$0fe
+	mov	timer_l,#$0cd
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;*********************************************************************
+; Initialization Code...
+;*********************************************************************
+init
+		mov	m,#$0e			; Initialize pullups on port A
+		mov	!ra,#%1100		; for I2C
+		mov	m,#$0f
+		mov     ra,#%1000              	; Initialize data latches for
+		mov	!ra,#%0111		; port A.
+		mov     rb,#%11101111          	; Initialize data latches for
+		mov	!rb,#%10101111		; port B.
+		mov	!rc,#%11110011		; port B.
+		call	zero_ram
+		mov     !option,#%00011111      ; enable rtcc interrupt and wreg
+		clrb	cntrl_3
+		retp
+;*********************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp

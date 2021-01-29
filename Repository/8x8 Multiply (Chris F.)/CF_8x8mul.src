@@ -1,0 +1,94 @@
+SX28L_compiler
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+                device  pins28,pages1,banks8,oschs
+                device  turbo,optionx
+ENDIF
+                id      'wakeup'
+                reset   start
+                freq    50_000_000
+
+
+;*********************************************************
+watch	answer_l,16,sdec
+watch	wreg,8,sdec
+watch	input,8,sdec
+watch	input2,8,sdec
+watch	loop_count,8,udec
+;*********************************************************
+	org	$10
+	math_bank	=	$
+
+	answer_l	ds	1
+	answer_h	ds	1
+	input		ds	1
+	input2		ds	1
+	loop_count	ds	1
+	math_flags	ds	1
+	neg		equ	math_flags.0
+	
+
+;*********************************************************
+start
+	bank	math_bank
+	mov	!option,#$7f
+:loop
+	break
+	call	SignedMultiply
+	jmp	:loop
+
+;*********************************************************
+SignedMultiply
+;*********************************************************
+	mov	input2,w	;1
+	mov	w,#$ff		;1
+	sb	input.7		;1
+	jmp	:input2		;1,3
+	xor	input,w		;1
+	inc	input		;1
+	inc	loop_count	;1;7
+:input2
+	sb	input2.7,	;1
+	jmp	:done		;1	
+	xor	input2,w	;1
+	inc	input2		;1
+	inc	loop_count	;1;12
+:done
+	setb	neg		;1
+	sb	loop_count.0	;1
+	clrb	neg		;1
+	clr	loop_count	;1
+	mov	w,input2	;1;17
+	call	Multiply	;87;104
+
+	sb	neg		;1
+	retp			;3
+	mov	w,#$ff		;1
+	xor	answer_h,w	;1
+	xor	answer_l,w	;1
+	inc	answer_l	;1
+	snz			;1
+	inc	answer_h	;1
+	retp			;3;113 cycles worst case
+		
+;*********************************************************
+Multiply ; Multiply W by input
+;*********************************************************
+	setb	loop_count.3	;1
+	clr	answer_l	;1
+	clr	answer_h	;1 ;3
+:loop
+	clc			;1
+	snb	input.0	;1
+	add	answer_h,w	;1
+	rr	answer_h	;1
+	rr	answer_l	;1
+	rr	input		;1
+	decsz	loop_count	;1
+	jmp	:loop		;3	10=looptime (78 on exit)
+				;    	78 + 3 = 81
+	retp			;3	82 + 3 = 84	ALWAYS!!!
+				;	for 16 bit result.

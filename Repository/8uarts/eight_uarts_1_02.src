@@ -1,0 +1,747 @@
+;******************************************************************************
+; Copyright © [04/11/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+; Eight Uart Demo.  8 UARTs running at 19.2kbaud, N, 8, 1
+;
+; Filename:	eight_uarts_1_01.src
+;
+; Author:	Unknown
+;
+; Repairs and Documentation:
+;		Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.01
+;
+; Part:		SX28AC rev. 2.5
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.04
+;
+; Date Written: Unknown
+;
+; Last Revised: April 15,1999
+;
+; Program Description:
+;	This program demonstrates the use of a Scenix SX to run 8 simultaneous
+;	Universal Asynchronous Receiver/Transmitters.
+;
+; Revision History:
+;	1.0 Someone wrote this but it didn't work.
+;	1.01 Documented the code and tested using the SX-Demo-Board.
+;
+;
+; Usage Hints:
+; 	To output serial, wait for the particular txX_flag to contain 0,
+; 	then write the byte to transmit to txX_data and write 10dec to txX_flag.
+;
+; 	To input serial, check for an rxX_full flag set.  Then get the
+; 	byte from the associated txX_data register.  Clear the rxX_full
+; 	flag afterwards. 
+;******************************************************************************
+;******************************************************************************
+; Assembler Defines
+;******************************************************************************
+SXDEMO			; comment this line if you wish to use all of port rb
+			; as receivers and all of port rc as transmitters.
+			; uncomment to try the program on the Parallax SXDEMO board.
+			
+
+
+;SX28L_compiler		; comment this line if using with
+			; SX-Key V 1.04 or lesser
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+		device	pins28,pages4,banks8		; 28-pin device, 4 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+ENDIF
+
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'8uarts'			; Version = 1.2
+
+		reset	start				; JUMP to start label on reset
+
+;**************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;**************************************************************************
+;watch		rx0_data,1,fstr
+watch		bitcounter,8,udec
+watch		rx1_data,1,fstr
+watch		rx2_data,8,ubin
+watch		rx3_data,1,fstr
+watch		rx4_data,1,fstr
+watch		rx5_data,1,fstr
+watch		rx6_data,1,fstr
+watch		rx7_data,1,fstr
+;watch		rx0_flag,8,udec
+;watch		rx1_flag,8,udec
+;watch		rx1_flag,8,ubin
+watch		master_count,8,udec
+watch		rx2_flag,8,udec
+watch		master_count,8,uhex
+watch		rx2_flag,8,uhex
+watch		rx3_flag,8,udec
+watch		rx4_flag,8,udec
+watch		rx5_flag,8,udec
+watch		rx6_flag,8,udec
+watch		rx7_flag,8,udec
+;watch		tx0_data,1,fstr
+;watch		tx1_data,1,fstr
+;watch		tx2_data,1,fstr
+;watch		tx3_data,1,fstr
+;watch		tx4_data,1,fstr
+;watch		tx5_data,1,fstr
+;watch		tx6_data,1,fstr
+;watch		tx7_data,1,fstr
+;watch		tx0_flag,8,udec
+;watch		tx1_flag,8,udec
+;watch		tx2_flag,8,udec
+;watch		tx3_flag,8,udec
+;watch		tx4_flag,8,udec
+;watch		tx5_flag,8,udec
+;watch		tx6_flag,8,udec
+;watch		tx7_flag,8,udec
+watch		tx0_data,8,ubin
+watch		tx1_data,8,ubin
+watch		tx2_data,8,ubin
+watch		tx3_data,8,ubin
+watch		tx4_data,8,ubin
+watch		tx5_data,8,ubin
+watch		tx6_data,8,ubin
+watch		tx7_data,8,ubin
+watch		tx0_flag,8,ubin
+watch		tx1_flag,8,ubin
+watch		tx2_flag,8,ubin
+watch		tx3_flag,8,ubin
+;watch		tx4_flag,8,ubin
+;watch		tx5_flag,8,ubin
+;watch		tx6_flag,8,ubin
+;watch		tx7_flag,8,ubin
+;*************************************************************
+; Defines
+;*************************************************************
+IFDEF	SXDEMO
+ra_dir		=	%0110
+ELSE
+ra_dir		=	%1111
+ENDIF
+rb_dir		=	%00000000
+rc_dir		=	%00000000
+
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+rx0_pin		=	rb.0
+rx1_pin		=	rb.1
+IFDEF	SXDEMO
+rx2_pin		=	ra.2
+ELSE
+rx2_pin		=	rb.2
+ENDIF
+rx3_pin		=	rb.3
+rx4_pin		=	rb.4
+rx5_pin		=	rb.5
+rx6_pin		=	rb.6
+rx7_pin		=	rb.7
+
+tx0_pin		=	rc.0
+tx1_pin		=	rc.1
+tx2_pin		=	rc.2
+tx3_pin		=	rc.3
+tx4_pin		=	rc.4
+tx5_pin		=	rc.5
+tx6_pin		=	rc.6
+tx7_pin		=	rc.7
+
+;**************************************************************************
+; Global Variables
+;**************************************************************************
+		org	8			;common-bank variables
+
+master_count	ds	1
+master_mask	ds	1
+
+itemp		ds	1
+bitcounter	ds	1
+rx_flags	ds	1
+rx0_full	=	rx_flags.0
+rx1_full	=	rx_flags.1
+rx2_full	=	rx_flags.2
+rx3_full	=	rx_flags.3
+rx4_full	=	rx_flags.4
+rx5_full	=	rx_flags.5
+rx6_full	=	rx_flags.6
+rx7_full	=	rx_flags.7
+
+;*************************************************************
+; Bank 1 Variables
+;*************************************************************
+		org	$10			;bank1 variables
+
+timer_low	ds	1			;timer write buffer
+timer_high	ds	1
+
+timer_flags	ds	1
+timer0_flag	=	timer_flags.0
+timer1_flag	=	timer_flags.1
+timer2_flag	=	timer_flags.2
+timer3_flag	=	timer_flags.3
+
+;*************************************************************
+; Bank 2 Variables
+;*************************************************************
+		org	$30			;bank2 variables
+
+;*************************************************************
+; Bank 3 Variables
+;*************************************************************
+		org	$50			;bank3 variables
+
+
+;*************************************************************
+; Bank 4 Variables
+;*************************************************************
+		org	$70			;bank4 variables
+
+serial_out	=	$
+
+tx0_flag	ds	1			;tx0
+tx0_data	ds	1
+
+tx1_flag	ds	1			;tx1
+tx1_data	ds	1
+
+tx2_flag	ds	1			;tx2
+tx2_data	ds	1
+
+tx3_flag	ds	1			;tx3
+tx3_data	ds	1
+
+tx4_flag	ds	1			;tx4
+tx4_data	ds	1
+
+tx5_flag	ds	1			;tx5
+tx5_data	ds	1
+
+tx6_flag	ds	1			;tx6
+tx6_data	ds	1
+
+tx7_flag	ds	1			;tx7
+tx7_data	ds	1
+
+;*************************************************************
+; Bank 5 Variables
+;*************************************************************
+		org     $90                     ;bank5 variables
+
+serial_in	=	$
+
+rx0_flag	ds	1			;rx0
+rx0_data	ds	1
+
+rx1_flag	ds	1			;rx1
+rx1_data	ds	1
+
+rx2_flag	ds	1			;rx2
+rx2_data	ds	1
+
+rx3_flag	ds	1			;rx3
+rx3_data	ds	1
+
+rx4_flag	ds	1			;rx4
+rx4_data	ds	1
+
+rx5_flag	ds	1			;rx5
+rx5_data	ds	1
+
+rx6_flag	ds	1			;rx6
+rx6_data	ds	1
+
+rx7_flag	ds	1			;rx7
+rx7_data	ds	1
+
+;*************************************************************
+; Bank 6 Variables
+;*************************************************************
+		org     $b0                     ;bank6 variables
+;*************************************************************
+; Bank 7 Variables
+;*************************************************************
+		org     $d0                     ;bank7 variables
+;*************************************************************
+; Bank 8 Variables
+;*************************************************************
+		org     $f0                     ;bank8 variables
+
+;**************************** INTERRUPT CODE *******************************
+;
+; Note: The interrupt code must always originate at 0h.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; 
+; With a retiw value of -163, a prescaler of 2, and an oscillator frequency of 
+; 50MHz, this code runs every 6.52us. (Frequency of 153.374 kHz = 8 *19200kHz)
+;******************************************************************************
+interrupt	org     $0                       ;interrupt starts at 0h
+
+		inc	master_count	;1	;update timing data
+		mov	w,<<master_mask	;1
+		rl	master_mask	;1
+
+
+	;************************  TRANSMIT  *************************
+	; 8 19.2 kbaud transmitters.  These transmitters use the FSR
+	; and a single bank of RAM to output the data.
+	;*************************************************************
+		bank	serial_out	;1
+
+		
+		mov	w,<<master_count;1	multiply master_count by 2
+		and	w,#$0e		;1 	keep in range and make even.
+		or	w,#serial_out	;1	load upper bits with serial_out
+		mov	fsr,w		;1	load fsr with new value
+		test	indf		;1	is this one transmitting?
+		jz	:out_done	;2,3	if no, this will be zero.
+		stc			;1	set carry
+		mov	w,#10		;1
+		xor	w,indf		;1
+		setb	fsr.0		;1 	If this is bit 10, clear carry.
+		snz			;1
+		clc			;1
+		sz			;1	
+		rr	indf		;1	If this is bit 10, don't rotate data byte
+		mov	w,master_mask	;1	
+		sc			;1	If data bit = 0, not W
+		not	w		;1
+		sc			;1	If data bit = 0, 
+IFDEF	SXDEMO
+		and	ra,w		;1	(w & RA)
+		snc			;1		else
+		or	ra,w		;1	w | RA
+ELSE
+		and	rc,w		;1	(w & RA)
+		snc			;1		else
+		or	rc,w		;1	w | RA
+ENDIF
+		clrb	fsr.0		;1	get bit counter
+		dec	indf		;1	and decrement it.
+:out_done		
+
+	;************************  RECEIVE   *************************
+	; 8 19.2 kbaud receivers.
+	;*************************************************************
+		bank	serial_in	;1
+
+rx0		clc			;1	;serial input
+		snb	rx0_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx0_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx0_flag,w	;1
+:busy		mov	w,rx0_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx0_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx0_data	;1	;data bit, save
+		add	rx0_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx0_full	;1	;if done, set flag
+		xor	rx0_flag,#$08	;1	;set 1 bit delay
+:not
+rx1		clc			;1	;serial input
+		snb	rx1_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx1_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx1_flag,w	;1
+:busy		mov	w,rx1_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx1_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx1_data	;1	;data bit, save
+		add	rx1_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx1_full	;1	;if done, set flag
+		xor	rx1_flag,#$08	;1	;set 1 bit delay
+:not
+rx2		clc			;1	;serial input
+		snb	rx2_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx2_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx2_flag,w	;1
+:busy		mov	w,rx2_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx2_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx2_data	;1	;data bit, save
+		add	rx2_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx2_full	;1	;if done, set flag
+		xor	rx2_flag,#$08	;1	;set 1 bit delay
+
+:not
+rx3		clc			;1	;serial input
+		snb	rx3_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx3_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx3_flag,w	;1
+:busy		mov	w,rx3_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx3_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx3_data	;1	;data bit, save
+		add	rx3_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx3_full	;1	;if done, set flag
+		xor	rx3_flag,#$08	;1	;set 1 bit delay
+:not
+rx4		clc			;1	;serial input
+		snb	rx4_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx4_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx4_flag,w	;1
+:busy		mov	w,rx4_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx4_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx4_data	;1	;data bit, save
+		add	rx4_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx4_full	;1	;if done, set flag
+		xor	rx4_flag,#$08	;1	;set 1 bit delay
+:not
+rx5		clc			;1	;serial input
+		snb	rx5_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx5_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx5_flag,w	;1
+:busy		mov	w,rx5_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx5_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx5_data	;1	;data bit, save
+		add	rx5_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx5_full	;1	;if done, set flag
+		xor	rx5_flag,#$08	;1	;set 1 bit delay
+:not
+rx6		clc			;1	;serial input
+		snb	rx6_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx6_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.6 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx6_flag,w	;1
+:busy		mov	w,rx6_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx6_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx6_data	;1	;data bit, save
+		add	rx6_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx6_full	;1	;if done, set flag
+		xor	rx6_flag,#$08	;1	;set 1 bit delay
+:not
+rx7		clc			;1	;serial input
+		snb	rx7_pin		;1	;get rx pin into c
+		stc			;1
+		mov	w,#$F0		;1	;busy?
+		and	w,rx7_flag	;1
+		jnz	:busy		;2,4	;(jitter okay)
+		jc	:not		;2,3	;start bit?
+		mov	w,#$0C		;1	;got start
+		add	w,master_count	;1	;set 1.5 bit delay
+		and	w,#$0F		;1
+		or	w,#$70		;1
+		mov	rx7_flag,w	;1
+:busy		mov	w,rx7_flag	;1	;busy, bit ready?
+		xor	w,master_count	;1
+		and	w,#$0F		;1
+		jnz	:not		;2,4	;(jitter okay)
+		mov	w,rx7_flag	;1	;if stop bit, don't save
+		or	w,#$0F		;1
+		incsz	wreg		;1
+		rr	rx7_data	;1	;data bit, save
+		add	rx7_flag,#$10	;2	;inc bit counter
+		snc			;1
+		setb	rx7_full	;1	;if done, set flag
+		xor	rx7_flag,#$08	;1	;set 1 bit delay
+:not
+		mov	w,#-163		;1	;interrupt every 163*2 clocks
+		retiw			;3	;(2 is from prescaler, rate=8*19.2KHz)
+;******************************************************************************
+; End of the Interrupt Service Routine
+;******************************************************************************
+;******************************************************************************
+start
+; Program Starts Here on Power Up
+;******************************************************************************
+		clr	ra			;init ra
+		mov	!ra,#ra_dir
+
+		clr	rb			;init rb
+		mov	!rb,#rb_dir
+
+		clr	rc			;init rc
+		mov	!rc,#rc_dir
+
+		mov	m,#$D			;set cmos input levels on rc
+		mov	!rc,#0
+		mov	m,#$F
+
+		mov	fsr,#$08		;reset all ram registers
+:loop		sb	fsr.3
+		setb	fsr.4
+		clr	ind
+		ijnz	fsr,:loop
+
+		mov	master_mask,#$01	;init master_mask
+		mov	ra,#$ff
+		mov	rb,#$ff
+		mov	rc,#$ff
+
+		mov	!option,#%00000000	;enable rtcc interrupt
+;******************************************************************************
+main
+; Main program.  This demo code simply demonstrates how to use the 8 
+; receivers and transmitters.  To run this code on the Parallax SX-DEMO
+; board, uncomment the line at the top of the board stating "SXDEMO"
+; This program outputs a small message on all 8 transmitters, and then
+; waits for a byte to be received on any of the receivers.  When a byte
+; is received on any of the receivers, that byte is output on all 8
+; transmitters, followed by the receiver-number that the byte was received
+; on.
+;******************************************************************************
+
+
+		mov	w,#13
+		call	@send_byte
+		mov	w,#10
+		call	@send_byte
+		mov	w,#'8'
+		call	@send_byte
+		mov	w,#' '
+		call	@send_byte
+		mov	w,#'U'
+		call	@send_byte
+		mov	w,#'A'
+		call	@send_byte
+		mov	w,#'R'
+		call	@send_byte
+		mov	w,#'T'
+		call	@send_byte
+		mov	w,#' '
+		call	@send_byte
+		mov	w,#'D'
+		call	@send_byte
+		mov	w,#'E'
+		call	@send_byte
+		mov	w,#'M'
+		call	@send_byte
+		mov	w,#'O'
+		call	@send_byte
+MAIN_PROGRAM
+		test	rx_flags
+		jz	MAIN_PROGRAM
+		
+		jb	rx0_full,:GOT_0
+		jb	rx1_full,:GOT_1
+		jb	rx2_full,:GOT_2
+		jb	rx3_full,:GOT_3
+		jb	rx4_full,:GOT_4
+		jb	rx5_full,:GOT_5
+		jb	rx6_full,:GOT_6
+		jb	rx7_full,:GOT_7
+
+:GOT_0
+		clrb	rx0_full
+		bank	serial_in
+		mov	w,rx0_data
+		call	@send_byte
+		mov	w,#'0'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_1
+		clrb	rx1_full
+		bank	serial_in
+		mov	w,rx1_data
+		call	@send_byte
+		mov	w,#'1'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_2
+		clrb	rx2_full
+		bank	serial_in
+		mov	w,rx2_data
+		call	@send_byte
+		mov	w,#'2'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_3
+		clrb	rx3_full
+		bank	serial_in
+		mov	w,rx3_data
+		call	@send_byte
+		mov	w,#'3'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_4
+		clrb	rx4_full
+		bank	serial_in
+		mov	w,rx4_data
+		call	@send_byte
+		mov	w,#'4'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_5
+		clrb	rx5_full
+		bank	serial_in
+		mov	w,rx5_data
+		call	@send_byte
+		mov	w,#'5'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_6
+		clrb	rx6_full
+		bank	serial_in
+		mov	w,rx6_data
+		call	@send_byte
+		mov	w,#'6'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+:GOT_7
+		clrb	rx7_full
+		bank	serial_in
+		mov	w,rx7_data
+		call	@send_byte
+		mov	w,#'7'
+		call	@send_byte
+		jmp	MAIN_PROGRAM
+
+	org	$200
+;******************************************************************************
+send_byte
+;
+;	This subroutine sends the byte in w via. RS-232 on all 8 transmitters.
+;
+;******************************************************************************
+		bank	serial_out
+:test0		test	tx0_flag
+		jnz	:test0
+:test1		test	tx1_flag
+		jnz	:test1
+:test2		test	tx2_flag
+		jnz	:test2
+:test3		test	tx3_flag
+		jnz	:test3
+:test4		test	tx4_flag
+		jnz	:test4
+:test5		test	tx5_flag
+		jnz	:test5
+:test6		test	tx6_flag
+		jnz	:test6
+:test7		test	tx7_flag
+		jnz	:test7
+		mov	tx0_data,w
+		mov	tx1_data,w
+		mov	tx2_data,w
+		mov	tx3_data,w
+		mov	tx4_data,w
+		mov	tx5_data,w
+		mov	tx6_data,w
+		mov	tx7_data,w
+		mov	w,#10
+		mov	tx0_flag,w
+		mov	tx1_flag,w
+		mov	tx2_flag,w
+		mov	tx3_flag,w
+		mov	tx4_flag,w
+		mov	tx5_flag,w
+		mov	tx6_flag,w
+		mov	tx7_flag,w
+		retp

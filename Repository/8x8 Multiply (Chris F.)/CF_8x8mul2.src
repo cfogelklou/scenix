@@ -1,0 +1,62 @@
+SX28L_compiler
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+                device  pins28,pages1,banks8,oschs
+                device  turbo,optionx
+ENDIF
+                id      'wakeup'
+                reset   start
+                freq    50_000_000
+
+
+;*********************************************************
+watch	answer_l,16,udec
+watch	wreg,8,udec
+watch	input,8,udec
+watch	loop_count,8,udec
+;*********************************************************
+	org	$10
+	math_bank	=	$
+
+	answer_l	ds	1
+	answer_h	ds	1
+	input		equ	answer_l
+	loop_count	ds	1
+	
+
+;*********************************************************
+start
+	bank	math_bank
+	mov	!option,#$7f
+	clr	loop_count
+:loop	clr	RTCC
+	break
+	call	Multiply
+	jmp	:loop
+;*********************************************************
+Multiply ; Multiply W by input
+;*********************************************************
+	setb	loop_count.3	;1
+	inc	loop_count	;1
+	clr	answer_h	;1 
+	clc			;1	4
+:loop
+	rr	answer_h	;1
+	rr	answer_l	;1
+	snc			;1
+	add	answer_h,w	;1
+	decsz	loop_count	;1
+	jmp	:loop		;3	8=looptime (71 on exit)
+				;    	71 + 4 = 75
+	retp			;3	75 + 3 = 78	ALWAYS!!!
+				;	for 16 bit result.
+
+
+
+
+
+
+	

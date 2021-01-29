@@ -1,0 +1,126 @@
+SX28L_compiler
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+                device  pins28,pages1,banks8,oschs
+                device  turbo,optionx
+ENDIF
+                id      'wakeup'
+                reset   start
+                freq    50_000_000
+
+watch	ulawbyte,8,uhex
+watch	sign,8,uhex
+watch	exponent,8,uhex
+watch	mantissa_l,16,uhex
+watch	sample_l,16,sdec
+watch	sample_l,16,shex
+watch	wreg,8,uhex
+watch	wreg,8,udec
+;*********************************************************
+	org	$10
+;*********************************************************
+
+;*********************************************************
+	org	$30
+;*********************************************************
+
+	u_law_bank	=	$
+
+	ulawbyte	ds	1
+	sign		ds	1
+	exponent	ds	1
+	mantissa_l	ds	1
+	mantissa_h	ds	1
+	sample_l	ds	1
+	sample_h	ds	1	
+
+;*********************************************************
+start
+	bank	u_law_bank
+	mov	!option,#$7f
+:loop
+	break
+	call	ulaw2linear
+	jmp	:loop
+
+;*********************************************************
+ulaw2linear
+;*********************************************************
+	bank	u_law_bank
+	mov	w,ulawbyte
+	not	w
+	mov	ulawbyte,w	; ulawbyte = ~ulawbyte;
+	and	w,#$80
+	mov	sign,w		; sign = (ulawbyte & 0x80)
+	mov	w,ulawbyte
+	and	w,#$70
+	mov	exponent,w	
+	swap	exponent	; exponent = (ulawbyte >> 4) & 0x07
+	mov	w,ulawbyte
+	and	w,#$0f
+	mov	mantissa_l,w	; mantissa = (ulawbyte & 0x0f)
+	clr	mantissa_h
+	mov	w,#3
+	add	w,exponent	; 					w = (exponent + 3)
+:loop
+	clc
+	rl	mantissa_l
+	rl	mantissa_h
+	decsz	wreg
+	jmp	:loop		; mantissa = (mantissa <<(exponent + 3))
+	clc
+
+	mov	w,exponent	
+	call	exp_lut_l
+	add	w,mantissa_l
+	mov	sample_l,w
+
+	mov	w,exponent
+	call	exp_lut_h
+	add	w,mantissa_h
+	mov	sample_h,w	; sample = exp_lut[exponent] + (mantissa<<(exponent+3))
+
+	test	sign
+	jz	:positive
+	mov	w,$ff
+	xor	sample_h,w
+	xor	sample_l,w
+	inc	sample_l
+	snz
+	inc	sample_h
+:positive			; if (sign != 0) sample = -sample
+	retp			; return (sample)
+;*********************************************************
+exp_lut_l;	static int exp_lut[8] = {0,132,396,924,1980,4092,8316,16764}
+;*********************************************************
+	clc
+	jmp	pc+w
+	retw	$00		; 0
+	retw	$84		; 132
+	retw	$8c		; 396
+	retw	$9c		; 924
+	retw	$bc		; 1980
+	retw	$fc		; 4092
+	retw	$7c		; 8316
+	retw	$7c		; 16764
+;*********************************************************
+exp_lut_h;	static int exp_lut[8] = {0,132,396,924,1980,4092,8316,16764}
+;*********************************************************
+	clc
+	jmp	pc+w
+	retw	$00		; 0
+	retw	$00		; 132
+	retw	$01		; 396
+	retw	$03		; 924
+	retw	$07		; 1980
+	retw	$0f		; 4092
+	retw	$20		; 8316
+	retw	$41		; 16764
+;*********************************************************
+	
+	
+		
+	

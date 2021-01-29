@@ -1,0 +1,259 @@
+IsrInfoSeg	MACRO
+;********************************************************************************
+;  Interrupt Service Routine
+;********************************************************************************
+		ENDM
+
+
+IsrDataSeg	MACRO
+;********************************************************************************
+;  Interrupt Service Routine
+;********************************************************************************
+
+		org	$10	
+
+IsrBank		= 	$10
+
+IsrTime50MHz	=	-108			;50Mhz * 2.17us = 108.5
+IsrTime		=	IsrTime50MHz		;Constant = MHz * 2.17us
+
+;**** Isr ****
+
+IsrMReg		ds	1
+IsrIntFlags	ds	1
+
+;**** IsrStatus **** (Global varible providing an interface to the Isr)
+
+TimerOverflow	=	IsrStatus.0
+IrdaTxStart	=	IsrStatus.1
+IrdaTxEmpty	=	IsrStatus.2		;1 = finished sending byte
+IrdaRxAvail	=	IsrStatus.3		;1 = received byte available to be read
+UartTxStart	=	IsrStatus.4
+UartTxEmpty	=	IsrStatus.5
+UartRxAvail	=	IsrStatus.6		;1 = received byte available to be read
+DebugSend	=	UartTxStart
+
+;**** Irda & Uart Status ****
+
+IrdaUartStatus	ds	1
+IrdaRxPulse	=	IrdaUartStatus.0
+IrdaRxMode	=	IrdaUartStatus.1	;1 = currently receiving a byte, 0 = idle
+IrdaTxMode	=	IrdaUartStatus.2	;1 = currently transmitting a byte, 0 = idle
+UartRxMode	=	IrdaUartStatus.3	;1 = currently receiving a byte, 0 = idle
+UartTxMode	=	IrdaUartStatus.4	;1 = currently transmitting a byte, 0 = idle
+
+;**** Irda ****
+
+IrdaTxPin	=	rb.7			;Output - Idle Low
+IrdaRxPin	=	rb.6			;Input  - Idle High
+IrdaRxInt	=	6			;Interrupt = bit 6
+
+Irda9600	=	48			;+0.47%
+Irda19200	=	24			;+0.47%
+Irda38400	=	12			;+0.47%
+Irda57600	=	8			;+0.47%
+Irda115200	=	4			;+0.47%
+
+IrdaSpeed	ds	1
+IrdaData	ds	1
+IrdaRxBits	ds	1
+IrdaBitCount	ds	1
+IrdaDivide	ds	1
+
+;**** Uart ****
+
+UartTxPin	=	rb.2			;Output - Idle High
+UartRxPin	=	rb.0			;Input  - Idle High
+
+Uart9600	=	48			;+0.47%
+Uart19200	=	24			;+0.47%
+Uart38400	=	12			;+0.47%
+Uart57600	=	8			;+0.47%
+Uart115200	=	4			;+0.47%
+
+UartSpeed	=	Uart115200
+
+UartTxData	=	DebugData		;Global Variable
+UartTxBits	ds	1
+UartTxBitCount	ds	1
+UartTxDivide	ds	1
+
+UartRxData	ds	1
+UartRxBits	ds	1
+UartRxBitCount	ds	1
+UartRxDivide	ds	1
+
+		org	$30
+
+TimerBank	= 	$30			;Shared with Framing layer
+
+Random		ds	1			;Increments every timer interrupt (108 cycles @ 50MHz)
+Timer1		ds	1			;Resetable, Increments every timer interrupt (108 cycles @ 50MHz)
+Timer2		ds	1			;Resetable, Increments every Timer1 overflow (27648 cycles @ 50MHz)
+Timer3		ds	1			;Resetable, Increments every Timer2 overflow (7077888 cycles @ 50MHz)
+
+;********************************************************************************
+		ENDM
+
+
+IsrCodeSeg	MACRO
+;********************************************************************************
+;  Interrupt Service Routine
+;********************************************************************************
+
+GlobalIsr					;Interrupt = Timer
+	bank	TimerBank
+	inc	Random				;1	Random increment (Note: The main code is synchronous with RTCC and so RTCC is not a random number)
+	inc	Timer1				;1	Timer: increment
+	snz					;1/2	Timer: overflow ?
+	inc	Timer2				;1	Timer: Yes => increment
+	snz					;1/2	Timer: overflow ?
+	inc	Timer3				;1	Timer: Yes => increment
+	snz					;1/2	Timer: overflow ?
+	setb	TimerOverflow			;1	Timer: Yes => set flag (Timer = 7 cycles)
+
+	bank	IsrBank				;1
+	mov	IsrMReg, m			;2	Backup M register
+	mov	m, #WKPND			;1	Set mode to examine port b interrupt flags
+	mov	w, #0				;1	Clear W
+	mov	!rb, w				;1	Swap contents of W and WKPEN_B (interrupt flags are cleared)
+	mov	IsrIntFlags, w			;1	Store cause of interrupt
+
+IrdaIsr						;	Irda -> IrdaRet: Idle = 6 cycles, Tx = 9/19/23 cycles, Rx = 12/21/27 cycles, RxStart = 18 cycles
+	snb	IrdaTxMode			;1/2	Irda Tx ?
+	jmp	IrdaTxDataIsr			;3	Yes => IrdaTxDataIsr
+	snb	IrdaTxStart			;1/2	Irda Tx ?
+	jmp	IrdaTxStartIsr			;3	Yes => IrdaTxStartIsr
+	snb	IrdaRxMode			;1/2	Irda Rx ?
+	jmp	IrdaRxDataIsr			;3	Yes => IrdaRxDataIsr
+	snb	IsrIntFlags.IrdaRxInt		;1/2	Falling edge of Rx pin indicating start bit ?
+	jmp	IrdaRxStartIsr			;3	Yes => IrdaRxStartIsr
+IrdaRet						;	Irda -> IrdaRet: Idle = 6 cycles, Tx = 9/19/23 cycles, Rx = 12/21/27 cycles, RxStart = 18 cycles
+
+UartTxIsr
+	snb	UartTxMode			;1/2	Transmitting ?
+	jmp	UartTxDataIsr			;3	Yes => UartTxDataIsr
+	snb	UartTxStart			;1/2	Start transmit ?
+	jmp	UartTxStartIsr			;3	Yes => UartTxStartIsr
+UartTxRet
+
+UartRxIsr
+	snb	UartRxMode			;1/2	Receiving ?
+	jmp	UartRxDataIsr			;3	Yes => UartRxDataIsr
+	sb	UartRxPin			;1/2	Start bit ? (start bit = 0)
+	jmp	UartRxStartIsr			;3	Yes => UartRxStartIsr
+UartRxRet
+
+	mov	m, IsrMReg			;2	Restore M register
+	mov	w, #IsrTime			;1	Interrupt in 108 @ 50Mhz cycles
+	retiw					;3	Total Isr Time = x cycles
+
+
+IrdaTxDataIsr					;	Time = 5/15/19 cycles
+	clrb	IrdaTxPin			;1	return to idle
+	decsz	IrdaDivide			;1/2
+	jmp	IrdaRet				;3	Isr Time = +5 cycles from IrdaTxIsr
+	sb	IrdaData.0			;1/2	Output next bit
+	setb	IrdaTxPin			;1	Output next bit
+	stc					;1	Stop bit (idle = 1)
+	rr	IrdaData			;1
+	mov	IrdaDivide, IrdaSpeed		;2	Apply baud rate
+	decsz	IrdaBitCount			;1/2
+	jmp	IrdaRet				;3	Isr Time = +15 cycles from IrdaTxIsr
+	clrb	IrdaTxMode			;1	Finished
+	setb	IrdaTxEmpty			;1	Flag to indicate that the transmission is complete
+	clrb	ledTX				;1	Turn off TX LED (indication LED not actual IR emitter)
+	jmp	IrdaRet				;3	Isr Time = +19 cycles from IrdaTxIsr
+
+IrdaTxStartIsr
+	clrb	IrdaTxStart			;1	Clear start mode
+	setb	ledTX				;1	Turn on TX LED (indication LED not actual IR emitter)
+	setb	IrdaTxPin			;1	Output start pulse (note position of this instruction is such that it matches the setb of the TxDataIsr)
+	mov	IrdaDivide, IrdaSpeed		;2	Apply baud rate
+	mov	IrdaBitCount, #10		;2	Bit count = 8 data + 1 stop + 1 for stop bit to complete
+	setb	IrdaTxMode			;1	Enter Tx mode
+	jmp	IrdaRet				;3	Isr Time = +n cycles
+
+IrdaRxDataIsr					;	Time = 4/13/19 cycles
+	snb	IsrIntFlags.IrdaRxInt		;1/2	Was a pulse received ?
+	setb	IrdaRxPulse			;1	Yes => Flag pulse
+	decsz	IrdaDivide			;1/2
+	jmp	IrdaRet				;3	Isr Time = +4 cycles from IrdaRxIsr
+	clc					;1	Determine bit
+	sb	IrdaRxPulse			;1/2	Determine bit
+	stc					;1	Determine bit
+	rr	IrdaRxBits			;1	Record bit
+	clrb	IrdaRxPulse			;1	Reset pulse flag
+	mov	IrdaDivide, IrdaSpeed		;2	Apply baud rate
+	decsz	IrdaBitCount			;1/2
+	jmp	IrdaRet				;3	Isr Time = +13 cycles from IrdaRxIsr
+	mov	IrdaData, IrdaRxBits		;2	Copy bits into IrdaData
+	clrb	IrdaRxMode			;1	Finished
+	setb	IrdaRxAvail			;1
+	clrb	ledRX				;1	Turn off RX LED (indication LED not actual IR emitter)
+	jmp	IrdaRet				;3	Isr Time = +19 cycles from IrdaRxIsr
+
+IrdaRxStartIsr					;	Time = 10 cycles
+	setb	ledRX				;1	Turn on RX LED (indication LED not actual IR emitter)
+	clc					;1
+	mov	w, >>IrdaSpeed			;1	W = IrdaSpeed / 2
+	mov	IrdaDivide, w			;1	IrdaDivide = IrdaSpeed * 0.5
+	mov	IrdaBitCount, #9		;2	Bit count = 9 (1/2 start, 8 data, ignore stop)
+	setb	IrdaRxMode			;1	Enter rx mode
+	jmp	IrdaRet				;3	Isr Time = +10 cycles from IrdaRxStartIsr
+
+UartTxDataIsr					;	Time = 4/15/18 cycles
+	decsz	UartTxDivide			;1/2
+	jmp	UartTxRet			;3	Isr Time = +n cycles from UartTxIsr
+	movb	UartTxPin, UartTxBits.0		;4	Output next bit
+	stc					;1	Stop bit (idle = 1)
+	rr	UartTxBits			;1
+	mov	UartTxDivide, #UartSpeed	;2	Apply baud rate
+	decsz	UartTxBitCount			;1/2
+	jmp	UartTxRet			;3	Isr Time = +n cycles from UartTxIsr
+	clrb	UartTxMode			;1	Finished
+	setb	UartTxEmpty			;1	Flag to indicate that the transmission is complete
+	jmp	UartTxRet			;3	Isr Time = +n cycles from UartTxIsr
+
+UartTxStartIsr
+	mov	UartTxBits, UartTxData		;2	Load data for transmission
+	clrb	UartTxPin			;1	Output start bit
+	mov	UartTxDivide, #UartSpeed	;2	Apply UartSpeed
+	mov	UartTxBitCount, #10		;2	Bit count = 8 data + 1 stop + 1 for stop bit to complete
+	clrb	UartTxStart			;1	Clear start mode
+	setb	UartTxMode			;1	Enter Tx mode
+	jmp	UartTxRet			;3	Isr Time = +n cycles
+
+UartRxDataIsr
+	decsz	UartRxDivide			;1/2
+	jmp	UartRxRet			;3	Isr Time = +n cycles
+	decsz	UartRxBitCount			;1/2
+	jmp	:Read				;3
+:Stop	mov	UartRxData, UartRxBits		;2	Copy bits into UartData
+	clrb	UartRxMode			;1	Finished
+	setb	UartRxAvail			;1
+	jmp	UartRxRet			;3	Isr Time = +n cycles
+:Read	clc					;1	Determine bit
+	snb	UartRxPin			;1/2	Determine bit
+	stc					;1	Determine bit
+	rr	UartRxBits			;1	Record bit
+	mov	UartRxDivide, #UartSpeed	;2	Apply baud rate
+	jmp	UartRxRet			;3	Isr Time = +n cycles
+
+UartRxStartIsr
+	mov	UartRxDivide, #UartSpeed / 2	;2	UartDivide = UartSpeed * 0.5
+	mov	UartRxBitCount, #10		;2	Bit count = 10 (1/2 start, 8 data, 1 stop)
+	setb	UartRxMode			;1	Enter rx mode
+	jmp	UartRxRet			;3	Isr Time = +n cycles
+
+
+IsrInit
+	clr	IsrStatus
+	bank	IsrBank
+	clr	IrdaUartStatus
+	mov	IrdaSpeed, #Irda9600
+	mov	!option, #%10011111		;enable rtcc interrupt
+	retp
+
+;********************************************************************************
+		ENDM

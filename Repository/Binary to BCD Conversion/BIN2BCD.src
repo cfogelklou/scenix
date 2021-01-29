@@ -1,0 +1,35 @@
+;******************************************************************************* 
+;BIN2BCD Routine 
+;Enter a 10 bit number in REGB & REGC. (High 2 bits in bits) 
+;1 and 0 of regB, low 8 bits in regC) Exits with BCD 
+;equivalent in REGA:REGB. (Hundreds digits in REGA, tens, ) 
+;ones in regB. Works between 0 and 999. Takes 113 cycles 
+;Written by Andy Warren. 
+;Converted to Scenix SX by Chris Fogelklou
+;******************************************************************************* 
+
+BIN2BCD		 
+		mov		REGA,#%00000001                        ; **[To Multi]** 
+
+B2BLOOP		 
+		rl		REGC
+		rl		REGB
+		rl		REGA
+
+		snc							; **--** STATUS register conversion
+		jmp		DONE1
+
+		add		REGB,#$003                             ; **[To Multi]** 
+		sb		REGB.3
+		sub		REGB,w
+
+		add		REGB,#$030                             ; **[To Multi]** 
+		sb		REGB.7
+		sub		REGB,w
+
+		jmp		B2BLOOP
+
+DONE1		 
+		retp
+
+;******************************************************************************* 

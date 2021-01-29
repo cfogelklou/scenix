@@ -1,0 +1,1802 @@
+;******************************************************************************
+; Copyright © [01/26/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+; SX Interrupt-Driven I2C Master demo.
+;
+; Filename:	irq_I2C_m&s_1_3.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.3
+;
+; Part:		SX28AC rev. 2.5
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.04
+;
+; Date Written: March 23,1999
+;
+; Last Revised: April 12,1999
+;
+; Program Description:
+;	This program demonstrates the use of a Scenix SX microcontroller to
+;	simultaneously perform the functions of an I2C master, as well as an
+;	I2C slave.  This program was written to demonstrate the I2C slave 
+;	routines, but the master was included because, otherwise, it would be
+;	difficult to demonstrate the useability of this software on the 
+;	Parallax SX-Demo Board without the master code.
+;
+;	Because room for ASCII strings was becoming tight, the instructions
+;	provided by the program itself are quite cryptic.  Read this blurb
+;	to gain a true understanding of the program's operation.
+;
+;	When the program begins, it performs the same task as the original
+;	I2C master code, which is to find all the slaves present on the bus.
+;
+;	Once finished, the program enters command mode.  These commands can
+;	be used to control the program:
+;
+;	?	=	Posts the help "blurb" back to the terminal screen.
+;	W	=	Write a null-terminated string to the 24LC01B on the 
+;			Parallax SX-Demo-Board (address set by the M option...
+;			see below)
+;	R	=	Read a null-terminated string from the 24LC01B on the
+;			Parallax SX-Demo-Board (address set by the M option)
+;	M	=	Sets the address of the slave which will be accessed.
+;			if you are going to read or write from the EEPROM, then
+;			this option should be in the address range of $A0 - $AF
+;			in order for the EEPROM to respond.  To go into terminal
+;			mode with the slave, enter the slave's address.
+;	S	=	Sets the I2C slave's address.  Changing this will change
+;			the address to which the slave responds.
+;	F	=	Polls for devices again.
+;	T	=	Terminal mode.  This demonstrates the capabilities of
+;			the I2C slave.  The slave is always running in this 
+;			demo program, and it sets the I2CS_rx_flag when it
+;			receives a new byte of data.  This terminal program
+;			simply outputs any bytes received by the slave to the
+;			serial port, for display on the terminal screen.
+;			Any characters received from the serial port are sent
+;			by the master to the slave address set by the M option.
+;			If the address set by the M option is non-existant on
+;			the I2C bus, a NACK message will be displayed.  You will
+;			know that the I2C slave is working if you get characters	
+;			typed on the keyboard displayed on the screen.  Two 
+;			SX-Demo-Boards can be connected together on the same I2C
+;			bus, and if the slave and master addresses are set up
+;			correctly, it will create a transparent communications
+;			bridge between two comm ports of the computer.  
+;
+;	The pin-outs on the Parallax SX-Demo board are as follows:
+;		scl_pin         EQU     ra.0			;I2C clock
+;		sda_pin         EQU     ra.1			;I2C data I/O
+;		rx_pin          EQU     ra.2			;UART receive input
+;		tx_pin          EQU     ra.3			;UART transmit output
+;		led_pin         EQU     rb.6			;LED output
+;		spkr_pin        EQU     rb.7			;Speaker output
+;		pwm0_pin        EQU     rc.0			;Pulse width mod. PWM0 output
+;		pwm1_pin        EQU     rc.2			;Pulse width mod. PWM1 output
+;		adc0_out_pin    EQU     rc.4			;ADC0 input pin
+;		adc0_in_pin     EQU     rc.5			;ADC0 output/calibrate pin
+;		adc1_out_pin    EQU     rc.6			;ADC1 input pin
+;		adc1_in_pin     EQU     rc.7			;ADC1 output/calibrate pin
+;
+;	Communications Protocol:
+;		This demo program requires some type of terminal program to interface with.  A PC
+;		running Windows95/98 and Hyperterminal will do.  The serial communications protocol is:
+;
+;		19200 baud
+;		No Parity
+;		8 Data Bits
+;		1 Stop bit
+;
+; Revision History:
+;	1.0 Core I2C master code and core I2C slave code with some test code.
+;	1.12 Many changes, updates to get the code to work properly.
+;	1.2 Added buffering to I2C master code.
+;	1.3 Added Master code from I2C_master_1_3 and re-vamped documentation and re-worked the demo
+;	    program.
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+;SX28L_compiler						; comment this line if using with
+							; SX-Key V 1.04 or lesser
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+		device	pins28,pages4,banks8		; 28-pin device, 4 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+ENDIF
+
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'i2c_13'			; Version = 1.2
+
+		reset	start				; JUMP to start label on reset
+
+
+;**************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;**************************************************************************
+watch	sda_pin,1,ubin
+watch	scl_pin,1,ubin
+watch	I2CM_port_buf.sda,1,ubin
+watch	I2CM_port_buf.scl,1,ubin
+watch	I2CS_port_buf.sda,1,ubin
+watch	I2CS_port_buf.scl,1,ubin
+watch	NACK_counter,8,udec
+watch	addr_counter,8,uhex
+
+watch	I2C_flags,8,ubin
+watch	I2CM_state,8,udec
+watch	I2CM_sub_state,8,ubin
+watch	I2CM_bit_count,8,udec
+watch	I2CM_byte,8,uhex
+watch	I2CM_byte,1,fstr
+watch	I2CM_flags,8,ubin
+
+watch	I2CM_index,8,udec
+watch	I2CM_num_bytes,8,udec
+
+;watch	I2CM_buffer,6,fstr
+watch	  I2CM_address,8,udec
+watch	  I2CM_data_0,8,uhex
+watch	  I2CM_data_1,8,uhex
+watch	  I2CM_data_2,8,uhex
+;watch	  I2CM_data_3,8,uhex
+;watch	  I2CM_data_4,8,uhex
+
+watch	temp,8,udec
+
+watch	I2CS_state,8,udec
+watch	I2CS_sub_state,8,udec
+watch	I2CS_port_buf,8,ubin
+watch	I2CS_bit_count,8,udec
+
+watch	I2CS_byte,8,uhex
+watch	I2CS_byte,1,fstr
+watch	I2CS_past_pres,8,ubin
+;watch	I2CS_data_out,8,ubin
+;watch	I2CS_data_out,1,fstr
+;watch	I2CS_data_in,8,ubin
+;watch	I2CS_data_in,1,fstr
+;*************************************************************
+; Macros
+;*************************************************************
+
+;**************************************************************************
+; Equates for certain baud rates: 19200 baud
+;**************************************************************************
+baud_bit	=       4                       ;for 19200 baud
+start_delay	=       16+8+1                  ; "    "     "
+int_period	=       163                     ; "    "     "
+
+;*************************************************************
+; I2C Defines
+;*************************************************************
+write		=	1			; The "write" state starts at 1
+						; in the jump table.
+read		=	13			; The "read" state starts
+						; at 13 in the jump table.
+eeprom_addr	=	%10100000		; The address for the eeprom
+eeprom_size	=       128                     ; storage space of EEPROM
+slave_address	=	$20			; Address of the Slave
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+scl		equ	0
+sda		equ	1
+scl_pin         EQU     ra.scl                  ;I2C clock
+sda_pin         EQU     ra.sda                  ;I2C data I/O
+rx_pin          EQU     ra.2                    ;UART receive input
+tx_pin          EQU     ra.3                    ;UART transmit output
+led_pin         EQU     rb.6                    ;LED output
+spkr_pin        EQU     rb.7                    ;Speaker output
+pwm0_pin        EQU     rc.0                    ;Pulse width mod. PWM0 output
+pwm1_pin        EQU     rc.2                    ;Pulse width mod. PWM1 output
+adc0_out_pin    EQU     rc.4                    ;ADC0 input pin
+adc0_in_pin     EQU     rc.5                    ;ADC0 output/calibrate pin
+adc1_out_pin    EQU     rc.6                    ;ADC1 input pin
+adc1_in_pin     EQU     rc.7                    ;ADC1 output/calibrate pin
+;**************************************************************************
+; Global Variables
+;**************************************************************************
+
+		org     $8                       ;Global Registers
+
+temp		ds	1			; Temporary variable
+isr_temp	ds	1			; Temporary variable used by the ISR.
+flags		ds	1			; Flags to indicate various things..
+	timer_flag	equ	flags.0		; Indicates a 16-bit timer rollover
+	rx_flag		equ	flags.1		; Indicates the reception of a bit from the UART
+
+I2C_flags	ds	1			; Flags various I2C things
+	I2CM_event_flag	equ	I2C_flags.0
+	I2CS_event_flag	equ	I2C_flags.1
+
+NACK_counter	ds	1
+addr_counter	ds	1
+
+;*************************************************************
+; Bank 1 Variables
+;*************************************************************
+		org     $10
+
+I2CM		=     $		; I2CM bank
+
+
+I2CM		=     $		; I2CM bank
+
+
+I2CM_state	ds	1	; This indicates the state that the I2CM master is currently in.
+I2CM_sub_state	ds	1	; This indicates the substate that the I2C master is currently in.
+I2CM_port_buf	ds	1	; This buffer holds the current state of the I2C port direction reg's
+I2CM_bit_count	ds	1	; Indicates the number of bits left to process in read/write
+I2CM_byte	ds	1	; The byte currently being written/read by the I2C master
+I2CM_flags	ds	1
+	I2CM_nack	equ	I2CM_flags.0	; This bit is set if the I2C master has received a NACK from the slave
+	I2CM_rx_flag	equ	I2CM_flags.1 	; Indicates that the number of bytes requested have been received
+I2CM_index 	ds	1	; The index into the I2CM buffer, used for writing	
+I2CM_num_bytes 	ds	1	; The index into the I2CM buffer, used for reading
+I2CM_buffer	 =	$	; The buffer uses the last 8 registers of this bank (pre-increments, so put I2CM buffer here.)
+  I2CM_address	ds	1	; The address to read/write to.
+  I2CM_data_0 	ds 	1	; Data buffer 
+  I2CM_data_1	ds	1	; Data buffer
+  I2CM_data_2	ds	1	; Data buffer
+  I2CM_data_3	ds	1	; Data buffer
+  I2CM_data_4	ds	1	; Data buffer
+  I2CM_data_5	ds	1	; Data buffer
+  I2CM_data_6	ds	1	; Data buffer
+;*************************************************************
+; Bank 2 Variables
+;*************************************************************
+		org     $30                     ;bank2 variables
+I2CS		=	$	; I2CS Bank (I2C slave)
+
+I2CS_state	ds	1	; This indicates the state that the I2C slave is currently in.
+I2CS_sub_state	ds	1	; This indicates the substate that the I2C slave is currently in.
+I2CS_port_buf	ds	1	; This buffer holds the current state of the I2C port direction reg's
+I2CS_address	ds	1	; This byte holds the address which the I2C slave will respond to.
+I2CS_bit_count	ds	1	; Indicates the number of bits left to process in read/write
+I2CS_byte	ds	1	; The byte currently being written/read by the I2C master
+I2CS_data_in	ds	1	; The saved data byte received from the master.
+I2CS_data_out	ds	1	; A byte of data to be read by the master.
+I2CS_past_pres	ds	1	; The last_state of the I2C port (to be compared with the present state)
+	I2CS_pres_scl	equ	I2CS_past_pres.0 ; The present state of the SCL line
+	I2CS_pres_sda	equ	I2CS_past_pres.1 ; The present state of the SDA line
+	I2CS_past_scl	equ	I2CS_past_pres.2 ; The state of the SCL line on last interrupt
+	I2CS_past_sda	equ	I2CS_past_pres.3 ; The state of the SDA line on last interrupt
+I2CS_flags	ds	1
+	I2CS_data_valid equ	I2CS_flags.0	; Lets the I2C slave know that there
+						; is valid data stored in I2CS_data_out
+	I2CS_rx_flag	equ	I2CS_flags.1	; This flag indicates when data has
+						; been received by an I2C master.
+	I2CS_data_needed equ	I2CS_flags.2	; This flag is set if the I2C master has tried
+						; to do a multiple read on this slave and there
+						; is no valid data present in the I2CS_data_out
+						; register.  The slave will hold the clock line
+						; low until this the I2CS_data_valid flag is
+						; set, indicating valid data.
+
+;*************************************************************
+; Bank 3 Variables
+;*************************************************************
+		org     $50                     ;bank3 variables
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+string		ds	1			;used by send_string to store the address in memory
+byte		ds	1			;used by serial routines
+hex		ds	1
+
+timers		=	$
+timer_l	ds	1				; low byte of 16-bit timer
+timer_h	ds	1				; high byte of 16-bit timer
+;*************************************************************
+; Bank 4 Variables
+;*************************************************************
+		org     $70                     ;bank4 variables
+;*************************************************************
+; Bank 5 Variables
+;*************************************************************
+		org     $90                     ;bank5 variables
+;*************************************************************
+; Bank 6 Variables
+;*************************************************************
+		org     $b0                     ;bank6 variables
+;*************************************************************
+; Bank 7 Variables
+;*************************************************************
+		org     $d0                     ;bank7 variables
+;*************************************************************
+; Bank 8 Variables
+;*************************************************************
+		org     $f0                     ;bank8 variables
+;**************************** INTERRUPT CODE *******************************
+;
+; Note: The interrupt code must always originate at 0h.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+interrupt	
+	org     $0                      ; interrupt starts at 0h
+
+	;********************************************************************
+	; I2C Master Stuff...
+	;********************************************************************
+	mov	w,ra
+	and	w,#%11111100		; Clear the data latches for SCL and SDA
+	mov	ra,w
+
+	mov	fsr,#I2CM_buffer	; Switch to I2CM bank and load FSR for
+					; buffer look-up, if needed.
+
+	sb	I2CM_port_buf.scl	; If the master is trying to drive the scl
+	call	@I2CM_ISR		; pin high, but the slave won't let it, pause.
+	snb	scl_pin			; (don't call I2C master isr)
+	call	@I2CM_ISR
+
+	mov	isr_temp,m		; Save the contents of the m register
+		
+	;********************************************************************
+	; Make sure I2C master doesn't interfere with slave, vice-versa
+	;********************************************************************
+	mov	m,#$f			; Update the I2C port with the buffered
+	mov	w,I2CM_port_buf		; port data, using open drain outputs
+	bank	I2CS
+	and	w,I2CS_port_buf
+	mov	!ra,w			; mov to data direction register
+
+	;********************************************************************
+	; Allow some time for this last change to propagate... do the timers
+	; and UARTS.
+	;********************************************************************
+;**************************************************************************
+:transmit
+; This is an asynchronous transmitter for RS-232 transmission
+; INPUTS:
+;	divider.divider_bit -	Transmitter/receiver only executes when this bit is = 1
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;**************************************************************************
+		bank	serial
+		clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    tx_count                ;are we sending?
+		JZ      :receive                ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+
+;**************************************************************************
+:receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;**************************************************************************
+		movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		jnz     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ;middle of next bit?
+		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		snz                             ;if so
+		setb    rx_flag                 ;  then set flag
+:rxdone
+;**************************************************************************
+do_timers	
+; The timer will tick at the interrupt rate (3.26us for 50MHz.)  To set up
+; the timers, move in FFFFh - (value that corresponds to the time.)  Example:
+; for 1ms = 1ms/3.26us = 306 dec = 132 hex so move in $FFFF - $0132 = $FECD
+;**************************************************************************
+
+		bank	timers			; Switch to the timer bank
+		mov	w,#1
+		add	timer_l,w		; add 1 to timer_l
+		jnc	:timer_out		; if it's not zero, then 
+		add	timer_h,w		; don't increment timer_h
+		snc
+		setb	timer_flag		
+		movb	led_pin,timer_h.6	; once timer_h is changed, update the LED
+:timer_out
+
+	;********************************************************************
+	; Now some I2C Slave Stuff...
+	;********************************************************************
+	bank	I2CS
+	clc				; Save the current state and past state of the I2C bus
+	snb	sda_pin
+	stc
+	rl	I2CS_past_pres
+	clc
+	snb	scl_pin
+	stc
+	rl	I2CS_past_pres
+
+	call	@I2CS_get_start_stop	; Check the new states to see if we've received a start or a stop
+
+	call	@I2CS_isr		; Call I2C slave ISR
+
+	;********************************************************************
+	; Make sure I2C master doesn't interfere with slave, vice-versa
+	;********************************************************************
+	mov	w,I2CS_port_buf		; Update the I2C port with the buffered port data,
+	bank	I2CM			; using open drain outputs
+	and	w,I2CM_port_buf
+	mov	!ra,w
+
+	mov	m,isr_temp		; Restore the m register.
+
+
+;******************************************************************************
+:ISR_DONE
+; This is the end of the interrupt service routine.  Now load 163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;******************************************************************************
+; End of the Interrupt Service Routine
+;******************************************************************************
+
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+start		
+; Program Starts Here on Power Up
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+
+		call	@init
+
+	;*********************************************************************************
+	; Main Program:
+	; Loops and does I2C stuff...
+	;*********************************************************************************
+
+
+	;*********************************************************************************
+	; Send Prompts
+	;*********************************************************************************
+begin		mov	w,#_hello
+		call	@send_string
+		mov	w,#_finding_devices
+		call	@send_string
+
+	;*********************************************************************************
+	; First, check every 7-bit address from 0 - 256 for which slaves are present...
+	; (Lowest bit is R/W bit).  Put address on bus.  If slave returns with ACK, it is
+	; present, so output the address.
+	;*********************************************************************************
+_start
+		bank	I2CM
+		clr	temp
+_loopstart	
+		bank	I2CM
+		clr	I2CM_num_bytes
+
+_find_loop
+		bank	I2CM
+		mov	w,temp
+		mov	I2CM_address,w
+		call	@I2CM_send_bytes
+		call	@I2CM_wait_not_busy
+		and	w,#$ff
+		jz	:device_found
+:next_device
+		setb	temp.0
+		inc	temp
+		jz	device_search_done
+		jmp	_loopstart
+:device_found
+		mov	w,temp
+		call	@send_hex
+		mov	w,#' '
+		call	@send_byte
+		setb	temp.0
+		inc	temp
+		jz	device_search_done
+		jmp	_loopstart
+
+device_search_done
+
+	;*********************************************************************************
+	; 	Done searching for devices, so now load I2CM_address with default of
+	;	$A0 (microchip EEPROM) and send out the instructions.
+	;*********************************************************************************
+
+		mov	w,#_instructions1
+		call	@send_string
+		mov	w,#_help
+		call	@send_string
+prompt		mov	w,#_prompt
+		call	@send_string
+	;*********************************************************************************
+	; Wait for input character.
+	; -S stores an input string
+	; -M dumps the contents of the EEPROM
+	; -A changes the address of the slave to write to.
+	; -? Gets help
+	;*********************************************************************************
+_cmd_loop	
+
+		clr	NACK_counter
+		jnb	rx_flag,_cmd_loop		; wait for an input character
+		clrb	rx_flag				; from terminal
+		bank	serial
+		mov	byte,rx_byte
+		call	@uppercase			; convert incoming byte to uppercase
+		cje	byte,#'?',:help			; send help
+		cje	byte,#'W',:store_string		; store incoming string to EEPROM
+		cje	byte,#'R',:mem_dump		; dump memory of eeprom
+		cje	byte,#'M',:set_address		; change address of slave to write to/ read from
+		cje	byte,#'S',:set_slave_address	; change the address of the slave
+		cje	byte,#'F',begin			; re-find devices
+		cje	byte,#'T',:terminal_mode	; Go to terminal mode, where any
+							;  character received by the slave is output
+							;  to the screen.
+		jmp	_cmd_loop			; and come back for more.
+
+	;*********************************************************************************
+	; Send Help
+	;*********************************************************************************
+:help
+		mov	w,#_help
+		call	@send_string
+		jmp	prompt
+
+	;*********************************************************************************
+	; Store a string of input characters, byte by byte.  Quit when user presses 
+	; enter.  Store a zero to indicate the termination of the string.
+	;*********************************************************************************
+:store_string
+		mov	w,#_type_string		; Prompt for string
+		call	@send_string
+		mov	w,#_storing		; Send "Storing @" message
+		call	@send_string
+		bank	I2CM
+		mov	w,I2CM_address		; Send hex address of slave
+		call	@send_hex
+		mov	w,#_prompt		; Send Prompt
+		call	@send_string
+
+		bank	I2CM
+		clr	temp			; temp is used to change the internal address
+						; pointer of the EEPROM
+:error_1	call	@I2CM_send_byte		; Set the starting address in EEPROM to 0		
+		call	@I2CM_wait_not_busy	; Wait until I2C master is done
+		and	w,#$ff			; if there was an error, try again.
+		jz	:get_loop		
+		incsz	NACK_counter		; If we still fail after 256 attempts, send "NACK."
+		jmp	:error_1		; message
+		jmp	:NACK		
+
+:get_loop
+		bank	serial
+		jnb	rx_flag,:get_loop		; wait for an input character
+		clrb	rx_flag				; from terminal
+		mov	byte,rx_byte
+		cje	byte,#$0d,:enter2		; if it equals a carriage return, parse the string.
+		mov	w,byte				; if it does not resemble the above characters, echo it.
+		call	@send_byte
+:error_2	bank	serial
+		mov	w,byte
+:I2C_send_zero	bank	I2CM
+		mov	I2CM_data_1,w
+		mov	I2CM_data_0,temp
+		call	@I2CM_send_2_bytes		; send the byte of data
+		call	@I2CM_wait_not_busy		; wait until I2C master is done
+		and	w,#$ff				; If there was an error, try again
+		jz	:next_byte			; with the same byte
+		incsz	NACK_counter
+		jmp	:error_2
+		jmp	:NACK
+:next_byte	inc	temp				; Increment the EEPROM memory location
+		test	I2CM_data_1			; check if the retrieved byte is zero...
+		sz	
+		jmp	:get_loop
+		jmp	:storage_done
+		
+		
+:enter2		bank	I2CM				; User pressed enter, so null terminate the
+		clr	wreg				; string in the EEPROM
+		jmp	:I2C_send_zero			; and send it.
+
+:storage_done
+		mov	w,#_finished			; send "finished" string
+		call	@send_string
+		jmp	prompt				; and send prompt
+
+	;*********************************************************************************
+	; Output the contents of the EEPROM.  Quit when the retrieved character is a 
+	; NULL
+	;*********************************************************************************
+:mem_dump
+
+		mov	w,#_retrieving		; Send "retrieving" string
+		call	@send_string
+		bank	I2CM
+		mov	w,I2CM_address		; Send hex address of slave
+		call	@send_hex
+		mov	w,#_prompt		; Send the prompt
+		call	@send_string
+
+:error_3	bank	I2CM
+		clr	I2CM_data_0		; Set the starting address of EEPROM
+		call	@I2CM_send_byte
+		call	@I2CM_wait_not_busy
+		and	w,#$ff			; If ACK, move on.
+		jz	:ret_loop
+		incsz	NACK_counter		; Try 256 times to get an ACK
+		jmp	:error_3		; If it fails, send "NACK." message.
+		jmp	:NACK
+		
+
+:ret_loop	bank	I2CM
+		call	@I2CM_get_byte		; If we are here, slave responded with ACK
+		test	wreg
+		jz	prompt
+		call	@send_byte
+		jmp	:ret_loop
+		jmp	prompt
+
+	;*********************************************************************************
+	; Set a new slave address to read from/write to.
+	;*********************************************************************************
+:set_address
+		call	@get_hex		; Get HEX value from user
+		bank	I2CM
+		mov	I2CM_address,w
+		jmp	prompt			; and go back to prompt
+		
+	;*********************************************************************************
+	; Send out "NACK." message and go back to the prompt.
+	;*********************************************************************************
+:NACK
+		mov	w,#_NACK
+		call	@send_string
+		jmp	prompt
+
+	;*********************************************************************************
+	; Set a new address of this SX's I2C slave device.
+	;*********************************************************************************
+
+:set_slave_address
+		call	@get_hex		; Get HEX value from user
+		bank	I2CS			; change the address of the slave
+		mov	I2CS_address,w
+		jmp	prompt			; and go back to prompt.
+
+	;*********************************************************************************
+	; Terminal mode:  In terminal mode, any characters received by this slave are
+	; sent to the serial port, and any characters received from the serial port are
+	; sent to the device at the address specified by the set_slave_address function.
+	; User can escape by pressing 'ESC'
+	;*********************************************************************************
+:terminal_mode
+		jb	rx_flag,:rs232_byte
+		bank	I2CS
+		jb	I2CS_rx_flag,:slave1_byte
+		jmp	:terminal_mode
+
+:rs232_byte
+		clrb	rx_flag
+		bank	serial
+		mov	byte,rx_byte
+		cje	byte,#$01b,prompt	; if user presses 'ESC', exit
+:again		bank	I2CM
+		call	@I2CM_wait_not_busy
+		and	w,#$ff
+		jz	:good
+		inc	NACK_counter
+		snz	
+		jmp	:NACK
+		call	@I2CM_send_byte
+		jmp	:again		
+
+:good		bank	serial
+		mov	w,byte
+		bank	I2CM
+		mov	I2CM_data_0,w
+		call	@I2CM_send_byte
+		jmp	:terminal_mode		
+		
+:slave1_byte
+		clrb	I2CS_rx_flag
+		mov	w,I2CS_data_in
+		call	@send_byte
+		jmp	:terminal_mode
+;*********************************************************************************
+;*********************************************************************************
+
+org	$200
+;*********************************************************************************
+I2CS_get_start_stop
+; This subroutine checks the I2CS_past_pres register for the presence of a start
+; or stop condition.  It takes the values present in the I2CS_past_pres register
+; and checks them against what would be in the register if a start or stop condition
+; had occured.  This subroutine should be called on every pass of the ISR, because
+; it runs independantly to the rest of the slave code and re-initializes the state
+; machine, regardless of its last state, on the receipt of these conditions.
+;*********************************************************************************
+	mov	w,I2CS_past_pres
+	and	w,#$0f
+	xor	w,#%00001101		; Compare with a start condition.
+	jz	:start
+	xor	w,#%00001010		; Compare XOR of start and stop with
+	sz				; what would be present if a stop was present.
+	retp
+
+:stop	clr	I2CS_state		; If stop, then make the I2C slave idle
+	clr	I2CS_sub_state
+	retp
+:start
+	mov	I2CS_state,#1		; If start, then start receiving the address.
+	retp
+;*********************************************************************************
+I2CS_ISR; -- I2C Slave Interrupt-Driven State Machine
+;	    ----------------------------------------
+;
+;	This is the main interrupt service routine for the I2C slave interrupt
+;	service routine.  It is a state machine, allowing semi-straightline 
+;	code to operate on successive calls.  The current state of this state
+;	machine is stored in the registers I2CS_state and I2CS_sub_state.  These
+;	are the discrete states of this state machine...
+;
+;  I2CS_idle
+;	I2CS_idle is the state used when no start condition has occurred
+;	and the device has not been addressed.  The I2C slave will sit in this
+;	state until the state is changed by the independant subroutine 
+;	I2CS_get_start_stop.  
+;
+;  I2CS_wait_for_scl_low
+;	This state simply waits until SCL goes low.  It is entered once
+;	I2CS_get_start_stop encounters a start condition.  Once SCL goes low,
+;	the state is incremented
+;
+;  I2CS_get_address
+;	This state prepares the I2CS_read_byte routine to get 8-bits of data. 
+;	It increments the state to I2CS_read_byte before exiting.
+;
+;  I2CS_read_byte
+;	This state reads a byte of data.  I2CS_bit_count needs to be loaded with
+;	#8 before entering this state, or it won't know to increment to the next
+;	state after 8 bits of data have been loaded.
+;
+;  I2CS_process_address
+;	This state simply performs a quick calculation to figure out if this slave
+;	was just addressed.  If it was not, then it changes the state back to 
+;	I2CS_idle.  If this slave was addressed, then this state prepares to either
+;	read data or write data, depending on the bit 1 of the first byte received.
+;
+;  I2CS_send_ack
+;	This state outputs an ACK pulse, to tell the master that data was received
+;	correctly.  It pulls SDA low while SCL is pulsed high and low by the master.
+;
+;  I2CS_read_data
+;	This state prepares I2CS_read_byte to receive 8 bits of data.  It increments
+;	the state before exiting.
+;
+;  I2CS_make_idle
+;	This state puts the I2C slave back into idle mode.
+;
+;  I2CS_process_data
+;	This state processes a byte of data which was just received.  It moves the 
+;	byte that was just received into the I2CS_data_in register, and sets the 
+;	I2CS_event_flag to indicate an I2CS event and sets the I2CS_rx_flag to 
+;	indicate that a byte of data was received by the slave.
+;
+;  I2CS_send_data
+;	This state prepares the I2CS_write_byte state to send the 8-bits of data
+;	in the I2CS_data_out register.
+;
+;  I2CS_write_byte
+;	This state outputs a byte of data, clocked out by the SCL pin.  It must be
+;	pre-prepared to send out a byte by having the I2CS_byte register loaded with
+;	valid data and having the I2CS_bit_count register loaded with #8.
+;
+;  I2CS_get_ack
+;	This state gets an ACK from the I2C master.  If an ACK is received, this state
+;	will try to send another byte of data from the I2CS_data_out register.  If no
+;	ACK is received, the slave will be put back into its idle state.
+;*********************************************************************************
+
+	mov	w,I2CS_state
+
+	add	PC,w			;  Add the state to the program counter
+					;  and go to the state in the jump table.
+
+	I2CS_idle_loc	=	$
+	jmp	I2CS_idle		; If I2C_state = 0, I2C is idle
+	jmp	I2CS_wait_for_scl_low	; Wait for SCL line to go low after start condition
+	jmp	I2CS_get_address	; Get the address
+	jmp	I2CS_read_byte		
+	jmp	I2CS_process_address	; Check to see if this device was addressed, and set
+					; up for read or write if it was.  If there is no valid
+
+	;***************
+	; I2CS being read
+	;***************
+	I2CS_being_read		=	$	; Go to this state if the slave is being read.
+	jmp	I2CS_send_ack
+	I2CS_being_read_again	=	$
+	jmp	I2CS_send_data		; Set up to send out a byte.
+	jmp	I2CS_write_byte		; Send the byte, clocked by SCL
+	jmp	I2CS_get_ack		; If we receive an ACK, then we are being read again.
+	jmp	I2CS_waiting_for_data	; If there is no valid data, wait for it.
+	
+	;***************
+	; I2CS being written
+	;***************
+	I2CS_being_written	=	$	; Go to this state if the slave is being written
+	jmp	I2CS_send_ack		; Send an ACK
+	jmp	I2CS_read_data	
+	jmp	I2CS_read_byte
+	jmp	I2CS_process_data
+	jmp	I2CS_send_ack
+	jmp	I2CS_make_idle
+;*********************************************************************************
+I2CS_idle
+;	I2CS_idle is the state used when no start condition has occurred
+;	and the device has not been addressed.  The I2C slave will sit in this
+;	state until the state is changed by the independant subroutine 
+;	I2CS_get_start_stop.  
+;*********************************************************************************
+	setb	I2CS_port_buf.scl
+	setb	I2CS_port_buf.sda
+	retp
+;*********************************************************************************
+I2CS_wait_for_scl_low
+;	This state simply waits until SCL goes low.  It is entered once
+;	I2CS_get_start_stop encounters a start condition.  Once SCL goes low,
+;	the state is incremented
+;*********************************************************************************
+	snb	I2CS_pres_scl
+	retp
+	clrb	I2CS_port_buf.scl
+	inc	I2CS_state
+	retp
+;*********************************************************************************
+I2CS_get_address
+;	This state prepares the I2CS_read_byte routine to get 8-bits of data. 
+;	It increments the state to I2CS_read_byte before exiting.
+;*********************************************************************************
+	mov	I2CS_bit_count,#8
+	inc	I2CS_state
+	retp
+;*********************************************************************************
+I2CS_read_byte
+;	This state reads a byte of data.  I2CS_bit_count needs to be loaded with
+;	#8 before entering this state, or it won't know to increment to the next
+;	state after 8 bits of data have been loaded.
+;*********************************************************************************
+
+	mov	w,I2CS_sub_state
+	add	PC,w
+	jmp	:state1
+	jmp	:state2
+
+:state1				; wait until SCL goes high
+	setb	I2CS_port_buf.scl
+	sb	I2CS_pres_scl
+	retp			
+	
+	inc	I2CS_sub_state	; If SCL is high, rotate in the bit
+	clc
+	snb	I2CS_pres_sda
+	stc
+	rl	I2CS_byte
+	retp
+:state2				; wait until SCL goes low
+	snb	I2CS_pres_scl
+	retp
+	clrb	I2CS_port_buf.scl
+	clr	I2CS_sub_state
+	dec	I2CS_bit_count
+	sz
+	retp
+	inc	I2CS_state
+	retp			; Stay in this I2CS_state until all 8 bits are received	
+;*********************************************************************************
+I2CS_process_address
+;	This state simply performs a quick calculation to figure out if this slave
+;	was just addressed.  If it was not, then it changes the state back to 
+;	I2CS_idle.  If this slave was addressed, then this state prepares to either
+;	read data or write data, depending on the bit 1 of the first byte received.
+;*********************************************************************************
+	mov	w,I2CS_byte		; Get the received I2C byte
+	xor	w,I2CS_address		; Compare with the address of this slave
+	and	w,#$FE			; And out the R/!W bit
+	jz	:slave_addressed	; If it is equal, send an ACK
+	clr	I2CS_state		; If the device was not addressed, then
+	clr	I2CS_sub_state		; go back to the idle state
+	retp
+:slave_addressed
+	clrb	I2CS_port_buf.scl	
+					; If bit zero of the incoming byte is a 0,
+	jb	I2CS_byte.0,:being_read	; then go to the being read state, otherwise
+					; go to the being written state
+	mov	I2CS_state,#(I2CS_being_written-I2CS_idle_loc)
+	retp
+
+:being_read
+	sb	I2CS_data_valid
+	jmp	I2CS_make_idle
+	mov	I2CS_state,#(I2CS_being_read-I2CS_idle_loc)
+	retp
+;*********************************************************************************
+I2CS_send_ack
+;	This state outputs an ACK pulse, to tell the master that data was received
+;	correctly.  It pulls SDA low while SCL is pulsed high and low by the master.
+;*********************************************************************************
+	mov	w,I2CS_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+
+:state1
+	clrb	I2CS_port_buf.sda	; Clear SDA to set up ACK
+	inc	I2CS_sub_state
+	retp
+:state2					
+	setb	I2CS_port_buf.scl	; Allow the clock to go high
+	sb	I2CS_pres_scl		; Check to see if the clock is high.
+	retp
+	inc	I2CS_sub_state
+	retp
+:state3
+	snb	I2CS_pres_scl
+	retp
+	clrb	I2CS_port_buf.scl
+	setb	I2CS_port_buf.sda
+	clr	I2CS_sub_state
+	inc	I2CS_state
+	retp
+;*********************************************************************************
+I2CS_read_data
+;	This state prepares I2CS_read_byte to receive 8 bits of data.  It increments
+;	the state before exiting.
+;*********************************************************************************
+	mov	I2CS_bit_count,#8
+	inc	I2CS_state
+	retp
+;*********************************************************************************
+I2CS_make_idle	
+;	This state puts the I2C slave back into idle mode.
+;*********************************************************************************
+	clr	I2CS_state
+	clr	I2CS_sub_state
+	setb	I2CS_port_buf.scl
+	setb	I2CS_port_buf.sda
+	retp
+;*********************************************************************************
+I2CS_process_data
+;	This state processes a byte of data which was just received.  It moves the 
+;	byte that was just received into the I2CS_data_in register, and sets the 
+;	I2CS_event_flag to indicate an I2CS event and sets the I2CS_rx_flag to 
+;	indicate that a byte of data was received by the slave.
+;*********************************************************************************
+	mov	I2CS_data_in,I2CS_byte
+	setb	I2CS_rx_flag
+	setb	I2CS_event_flag	; Indicate that a byte has been received with the
+				; global event flag.
+	inc	I2CS_state
+	retp
+
+;*********************************************************************************
+I2CS_send_data
+;	This state prepares the I2CS_write_byte state to send the 8-bits of data
+;	in the I2CS_data_out register.
+;*********************************************************************************
+	inc	I2CS_state
+	clr	I2CS_sub_state
+	clrb	I2CS_data_valid
+	mov	I2CS_byte,I2CS_data_out
+	mov	I2CS_bit_count,#8
+	retp
+;*********************************************************************************
+I2CS_write_byte
+;	This state outputs a byte of data, clocked out by the SCL pin.  It must be
+;	pre-prepared to send out a byte by having the I2CS_byte register loaded with
+;	valid data and having the I2CS_bit_count register loaded with #8.
+;*********************************************************************************
+	mov	w,I2CS_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+:state1
+	rl	I2CS_byte
+	setb	I2CS_port_buf.sda
+	sc
+	clrb	I2CS_port_buf.sda
+	inc	I2CS_sub_state
+	retp
+:state2
+	setb	I2CS_port_buf.scl	; allow scl to go high, indicating slave is
+					; ready
+	snb	I2CS_pres_scl		; If SCL is not yet high, don't proceed to next state.
+	inc	I2CS_sub_state
+	retp
+:state3
+	snb	I2CS_pres_scl
+	retp
+	clr	I2CS_sub_state
+	clrb	I2CS_port_buf.scl	; Put scl low again to indicate slave is processing
+	setb	I2CS_port_buf.sda	; release sda line again
+	dec	I2CS_bit_count
+	sz				; once we've done all 8 bits, go to next state	
+	retp
+	inc	I2CS_state
+	retp
+;*********************************************************************************
+I2CS_get_ack
+;	This state gets an ACK from the I2C master.  If an ACK is received, this state
+;	will try to send another byte of data from the I2CS_data_out register.  If no
+;	ACK is received, the slave will be put back into its idle state.
+;*********************************************************************************
+	mov	w,I2CS_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+
+:state1
+	setb	I2CS_port_buf.scl
+	sb	I2CS_pres_scl
+	retp
+	jb	I2CS_pres_sda,:NACK
+	inc	I2CS_sub_state
+	retp
+:NACK
+	clr	I2CS_sub_state
+	clr	I2CS_state
+	retp
+:state2
+	snb	I2CS_pres_scl
+	retp
+	clrb	I2CS_port_buf.scl
+	clr	I2CS_sub_state
+	inc	I2CS_state
+	retp
+;*********************************************************************************
+I2CS_waiting_for_data
+;	This state waits for the mainline routine to put some valid data in the
+;	I2C_data_out register.  This state is only reached if the master has 
+;	indicated it wants more data by sending an ACK after the last byte.
+;*********************************************************************************
+	jb	I2CS_data_valid,:data_valid
+	setb	I2CS_data_needed
+	setb	I2CS_event_flag
+	retp
+:data_valid
+	mov	I2CS_state,#(I2CS_being_read_again-I2CS_idle_loc)
+	retp
+
+;*********************************************************************************
+; End of I2CS state machine... beginning of I2CS subroutines.
+;*********************************************************************************
+I2CS_init
+;	This subroutine should be called on initialization of the program.  It
+;	initializes the variables which are critical to the operation of the 
+;	I2CS slave state machine.
+;*********************************************************************************
+	mov     I2CS_port_buf,#%0111    ;Set RA in/out directions
+	mov     I2CS_past_pres,#$ff     ;Let part know last states have all been highs
+	mov	I2CS_address,#slave_address
+	retp	
+;**************************************************************************
+org	$300
+;**************************************************************************
+; String data (for RS-232 output) and tables needs to be in page $300
+;**************************************************************************
+_hello          dw      13,10,'SX I2C M&S Demo V.1.3',0
+_instructions1  dw      13,10,'? = Help',0
+_help           dw      13,10,'T = Term.',13,10,'W = W. EEPROM',13,10,'R = R. slave',13,10,'M = R/W address',13,10,'S = Slave address',0
+_prompt		dw	13,10,'>',0
+_finding_devices dw	13,10,'Finding Devices...',0
+_type_string	dw	13,10,'Type string & ENTER',0
+_storing	dw	13,10,'Storing @ $',0
+_finished	dw	13,10,'Finished.',0
+_retrieving	dw	13,10,'Retrieving @ $',0
+_enter_hex	dw	13,10,'Enter hex address $',0
+_NACK		dw	13,10,'NACK.',0
+;*********************************************************************************
+org	$400
+
+I2CM_send_byte		jmp	_I2CM_send_byte
+I2CM_send_bytes		jmp	_I2CM_send_bytes
+I2CM_send_2_bytes	jmp	_I2CM_send_2_bytes
+I2CM_get_byte		jmp	_I2CM_get_byte
+I2CM_get_bytes		jmp	_I2CM_get_bytes
+I2CM_wait_not_busy	jmp	_I2CM_wait_not_busy
+I2CM_init		jmp	_I2CM_init
+;*********************************************************************************
+I2CM_ISR; -- I2C Master Interrupt-Driven State Machine
+;	    -------------------------------------------
+;	This is the I2C Master Interrupt Service Routine.  It is an interrupt-
+;	driven state machine which allows all of the actions of the I2C Master
+;	controller to be carried out, virtual peripheral style, with virtually
+;	no interaction from the mainline program.  It
+;I2CM_idle
+; 	This is the state that the I2C Master is usually in when it is not in use.
+; 	It just ensures that the I2C_port_buf SCL and SDA are both set high
+;I2CM_start
+; 	When any mainline program wants to use the I2C master it puts the master into
+; 	start mode.  This mode creates a start condition on the I2C bus.  A start 
+;	condition is created when SDA goes from high to low while SCL stays high.
+;I2CM_start_write
+;	This state performs some pre-processing which allows the I2CM_write state to
+;	do its work.  It sets up the bit count, gets the next piece of data from the
+;	buffer and prepares to send it.
+;I2CM_write
+;	This state writes the data in I2CM_byte to the I2C bus
+;I2CM_get_ack
+;	This state gets an ACK from the slave device.  If no ACK is received, the I2C
+;	Master state machine puts a stop condition on the bus and the I2CM_flags 
+;	register is loaded to indicate that a NACK has occurred.
+;I2CM_write_repeat
+;	This state determines, after one byte of data is sent, whether or not
+; 	there is another byte to be sent.  If so, this state goes back to I2CM_start_write
+;	and sends the next byte.
+;I2CM_stop
+;	This state puts a stop condition on the I2C bus and resets the state machine back
+;	to its idle state.  A stop condition is when SDA goes from low to high while SCL
+;	is high.
+;I2CM_start_read
+;	This state simply loads the contents of the I2CM_address register into the I2CM_byte
+;	register and sets up the I2CM_write state to output the address of the slave to read.
+;I2CM_read_data	
+; 	This state prepares the I2CM read routine so it can read from the slave device.  It
+;	initializes the bit count, etc.
+;I2CM_read
+; 	This state read 8 bits of data from the slave device.
+;I2CM_store_byte
+; 	This state stores the byte just read into the buffer.
+;I2CM_send_ack
+; 	This state sends an ack if there is data left to write, and a NACK if there is
+;	no data left to write.
+;*********************************************************************************
+
+	mov	w,I2CM_state
+	add	PC,w			;  Add the state to the program counter
+					;  and go to the state in the jump table.
+
+I2CM_idle_loc		=	$
+	jmp	I2CM_idle		; If I2C_state = 0, I2C is idle
+
+I2CM_write_loc	=	$
+	;***************
+	:I2CM_write
+	;***************
+	jmp	I2CM_start		; Make SDA go low while SCL is high
+	jmp	I2CM_start_write	; Load a byte from the buffer and prepare to send. 
+	jmp	I2CM_write		; Write it.
+	jmp	I2CM_get_ack		; Get an ACK signal
+	jmp	I2CM_write_repeat	; Check to see if we have finished sending (if buffer
+					;  read index = buffer write index)
+I2CM_stop_loc	=	$
+	jmp	I2CM_stop		; If write_repeat determines we're finished, then send stop
+I2CM_read_loc	=	$		; Load this state into state machine if we are starting to read
+	;***************
+	:I2CM_read
+	;***************
+	jmp	I2CM_start		;
+	jmp	I2CM_start_read		; Write address used for reading
+	jmp	I2CM_write 		; (writing address)
+	jmp	I2CM_get_ack		;
+I2CM_read_rpt_loc =	$
+	jmp	I2CM_read_data		;
+	jmp	I2CM_read		; Keep doing this until done
+	jmp	I2CM_store_byte		;
+	jmp	I2CM_send_ack		;
+	jmp	I2CM_stop		;
+				
+;*********************************************************************************
+I2CM_idle
+; 	This is the state that the I2C Master is usually in when it is not in use.
+; 	It just ensures that the I2C_port_buf SCL and SDA are both set high
+;*********************************************************************************
+	setb	I2CM_port_buf.sda
+	setb	I2CM_port_buf.scl
+	retp
+
+;*********************************************************************************
+I2CM_start
+; 	When any mainline program wants to use the I2C master it puts the master into
+; 	start mode.  This mode creates a start condition on the I2C bus.  A start 
+;	condition is created when SDA goes from high to low while SCL stays high.
+;*********************************************************************************
+	mov	w,I2CM_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+	jmp	:state4
+	jmp	:state5
+
+:state1
+	setb	I2CM_port_buf.sda
+	inc	I2CM_sub_state
+	retp
+:state2
+	setb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+
+:state3
+	clrb	I2CM_port_buf.sda
+	inc	I2CM_sub_state
+	retp
+:state4
+	clrb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+:state5
+	setb	I2CM_port_buf.sda
+	clr	I2CM_sub_state
+	inc	I2CM_state
+	retp
+;*********************************************************************************
+I2CM_start_write	
+;	This state performs some pre-processing which allows the I2CM_write state to
+;	do its work.  It sets up the bit count, gets the next piece of data from the
+;	buffer and prepares to send it.
+;*********************************************************************************
+	inc	I2CM_index
+	add	fsr,I2CM_index
+	mov	w,indf
+
+	mov	I2CM_byte,w
+	mov	I2CM_bit_count,#8
+	inc	I2CM_state
+	retp
+;*********************************************************************************
+I2CM_write
+;	This state writes the data in I2CM_byte to the I2C bus
+;*********************************************************************************
+	mov	w,I2CM_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+:state1
+	setb	I2CM_port_buf.sda
+	rl	I2CM_byte
+	sc
+	clrb	I2CM_port_buf.sda
+	inc	I2CM_sub_state
+	retp
+:state2
+	setb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+:state3
+	clrb	I2CM_port_buf.scl
+	dec	I2CM_bit_count
+	jz	:done
+	clr	I2CM_sub_state
+	retp
+:done
+	clr	I2CM_sub_state
+	inc	I2CM_state
+	retp	
+;*********************************************************************************
+I2CM_get_ack
+;	This state gets an ACK from the slave device.  If no ACK is received, the I2C
+;	Master state machine puts a stop condition on the bus and the I2CM_flags 
+;	register is loaded to indicate that a NACK has occurred.
+;*********************************************************************************
+	mov	w,I2CM_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+	jmp	:state4
+:state1
+	setb	I2CM_port_buf.sda
+	inc	I2CM_sub_state
+	retp
+:state2
+	setb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+:state3
+	sb	sda_pin
+	inc	I2CM_sub_state
+	sb	sda_pin
+	retp			; if no ack,
+	mov	I2CM_state,#(I2CM_stop_loc-I2CM_idle_loc)
+	clr	I2CM_sub_state	; send a stop and indicate that this didn't work.
+	setb	I2CM_NACK	; set I2CM_NACK to show that this did not go through.
+	retp
+:state4
+	clrb	I2CM_port_buf.scl
+	clr	I2CM_sub_state
+	inc	I2CM_state	; move on to next state
+	retp
+
+;*********************************************************************************
+I2CM_write_repeat
+;	This state determines, after one byte of data is sent, whether or not
+; 	there is another byte to be sent.  If so, this state goes back to I2CM_start_write
+;	and sends the next byte.
+;*********************************************************************************
+
+	mov	w,I2CM_num_bytes	; test the read index to see if it is = to write index.
+	xor	w,I2CM_index	; if it is, then we have finished writing the buffer via. I2C.
+	jz	:I2CM_write_done
+	dec	I2CM_state	; back to get_ack
+	dec	I2CM_state	; back to write
+	dec	I2CM_state	; back to write_data
+	retp
+
+:I2CM_write_done
+	
+	inc	I2CM_state	; move on to next state (stop)
+	retp			; and start the stop bit	
+
+;*********************************************************************************
+I2CM_stop
+;	This state puts a stop condition on the I2C bus and resets the state machine back
+;	to its idle state.  A stop condition is when SDA goes from low to high while SCL
+;	is high.
+;*********************************************************************************
+	mov	w,I2CM_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+:state1
+	clrb	I2CM_port_buf.sda
+	inc	I2CM_sub_state
+	retp
+:state2
+	setb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+:state3
+	setb	I2CM_port_buf.sda
+	clr	I2CM_sub_state		; put the state machine in Idle
+	clr	I2CM_state
+	clr	I2CM_num_bytes
+	mov	w,#$ff
+	mov	I2CM_index,w
+	retp
+
+;*********************************************************************************
+; I2CM_read subroutines
+;*********************************************************************************
+;*********************************************************************************
+I2CM_start_read
+;	This state simply loads the contents of the I2CM_address register into the I2CM_byte
+;	register and sets up the I2CM_write state to output the address of the slave to read.
+;*********************************************************************************
+	mov	I2CM_byte,I2CM_address
+	inc	I2CM_index
+	mov	I2CM_bit_count,#8
+	inc	I2CM_state
+	retp
+;*********************************************************************************
+I2CM_read_data	
+; 	This state prepares the I2CM read routine so it can read from the slave device.  It
+;	initializes the bit count, etc.
+;*********************************************************************************
+	mov	I2CM_bit_count,#8
+	inc	I2CM_state
+	jmp	I2CM_read
+;*********************************************************************************
+I2CM_read
+; 	This state read 8 bits of data from the slave device.
+;*********************************************************************************
+	mov	w,I2CM_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+
+:state1
+	setb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+:state2
+	stc
+	sb	sda_pin
+	clc
+	rl	I2CM_byte
+	inc	I2CM_sub_state
+	retp
+:state3
+	clrb	I2CM_port_buf.scl
+	clr	I2CM_sub_state
+	dec	I2CM_bit_count
+	sz	
+	retp
+	inc	I2CM_state
+	retp
+
+;*********************************************************************************
+I2CM_store_byte
+; 	This state stores the byte just read into the buffer.
+;*********************************************************************************
+	mov	isr_temp,I2CM_byte
+	inc	I2CM_index
+	add	fsr,I2CM_index
+	mov	indf,isr_temp
+	inc	I2CM_state
+	setb	I2CM_rx_flag
+	retp
+;*********************************************************************************
+I2CM_send_ack
+; 	This state sends an ack if there is data left to write, and a NACK if there is
+;	no data left to write.
+;*********************************************************************************
+	mov	w,I2CM_sub_state
+	add	pc,w
+	jmp	:state1
+	jmp	:state2
+	jmp	:state3
+	jmp	:state4	
+:state1
+	clrb	I2CM_port_buf.sda
+	mov	w,I2CM_index
+	xor	w,I2CM_num_bytes
+	snz
+	setb	I2CM_port_buf.sda
+	inc	I2CM_sub_state
+	retp
+:state2
+	setb	I2CM_port_buf.scl	; Pulse the clock
+	inc	I2CM_sub_state
+	retp
+:state3
+	clrb	I2CM_port_buf.scl
+	inc	I2CM_sub_state
+	retp
+:state4
+	setb	I2CM_port_buf.sda
+	clr	I2CM_sub_state
+	mov	w,I2CM_index
+	xor	w,I2CM_num_bytes
+	jz	:done
+	mov	I2CM_state,#(I2CM_read_rpt_loc - I2CM_idle_loc) ;back to read 
+	retp
+:done	inc	I2CM_state	; If this was the last byte to be read, send a stop
+	retp
+
+org	$500
+;*********************************************************************************
+; I2CM subroutines:  Mainline Access routines (call from the mainline)
+;*********************************************************************************
+;*********************************************************************************
+_I2CM_send_2_bytes
+; 	This routine is useful for writing to an EEPROM, where the address is written,
+;	then the starting address in memory, and then the data to write.  It actually
+;	only writes one byte of data to the EEPROM (the byte in I2CM_data_1)
+;*********************************************************************************
+		mov	I2CM_num_bytes,#2 ; There is one byte of data in the buffer
+		jmp	I2CM_send_bytes
+;*********************************************************************************
+_I2CM_send_byte
+; 	This routine sets up the I2CM state machine to write the byte of data in
+; 	the I2CM_data_0 register.  Before entering this routine, make sure that
+;	the I2CM state machine is in its idle state (use the I2CM_wait_not_busy 
+;	subroutine) and that the I2CM_address is loaded with the address of the
+;	slave that this byte is going to, and that I2CM_data_0 is loaded with the
+;	data to send.
+;*********************************************************************************
+		mov	I2CM_num_bytes,#1 ; There is one byte of data in the buffer
+;*********************************************************************************
+_I2CM_send_bytes
+; 	This routine sets up the I2CM state machine to write the bytes of data in
+; 	the I2CM_data_0 - I2CM_data_n registers.  Before entering this routine, 
+;	make sure that the I2CM state machine is in its idle state (use the 
+;	I2CM_wait_not_busy subroutine) and that I2CM_address is loaded with the 
+;	address of the slave that this byte is going to, that I2CM_data_0 - I2CM_data_n
+;	are loaded loaded with the data to send, and that the I2CM_num_bytes register
+;	is loaded with the number of data bytes to send.
+;*********************************************************************************
+		mov	w,#%11111110
+		and	I2CM_address,w
+		clrb	I2CM_nack
+		mov	I2CM_state,#(I2CM_write_loc-I2CM_idle_loc)
+		retp
+;*********************************************************************************
+_I2CM_wait_not_busy
+; 	This routine polls the I2CM_state register until it is not busy.  It returns 
+;	when the I2C master state machine becomes idle.  It returns a (0) in the w
+;	register if the transfer appeared successful (ie.  The slave returned an ACK
+;	when addressed), and a (1) in the w register if the slave did not return
+;	an ack when addressed/written.
+;*********************************************************************************
+:wait_loop	test	I2CM_state
+		jnz	:wait_loop	; wait until I2C is idle
+		mov	w,#1		; return (1) if we are idle because a NACK was
+		snb	I2CM_nack	; received.  Return (0) if we are idle because
+		retp			; this was successful
+		clr	w		
+		retp
+;*********************************************************************************
+_I2CM_get_byte
+;	This routine gets one byte of data from the slave at address I2CM_address.
+;	before calling this routine, ensure that the I2C Master State Machine is
+;	in its idle state (use the I2CM_wait_not_busy subroutine) and that the
+;	I2CM_address register is loaded with a valid address.  The routine returns
+;	with the byte received in the w register and in the I2CM_data_0 register.
+;*********************************************************************************
+:nack		mov	w,#%00000001
+		or	I2CM_address,w
+		mov	I2CM_num_bytes,#1
+		clrb	I2CM_nack
+		mov	I2CM_state,#(I2CM_read_loc-I2CM_idle_loc)
+		call	I2CM_wait_not_busy
+		and	w,$ff
+		jnz	:nack
+		clrb	I2CM_rx_flag
+		mov	w,I2CM_data_0
+		retp
+;*********************************************************************************
+_I2CM_get_bytes
+;	This routine gets I2CM_num_bytes of data from the slave at address
+;	I2CM_address.  Before calling this routine, ensure that the I2CM state
+;	machine is idle by using the I2CM_wait_not_busy subroutine, that I2CM_address
+;	register contains the address of the slave to be read from, and that the
+;	I2CM_num_bytes register is loaded with the number of bytes of data to receive.
+;	The received bytes will be contained in registers I2CM_data_0 to I2CM_data_n.
+;*********************************************************************************
+		mov	w,#%00000001
+		or	I2CM_address,w
+		clrb	I2CM_nack
+		clrb	I2CM_rx_flag
+		mov	I2CM_state,#(I2CM_read_loc-I2CM_idle_loc)
+		retp
+;*********************************************************************************
+_I2CM_init
+;	This subroutine should be called on startup.  It initializes the registers
+;	which are critical to the operation of the I2CM state machine.
+;*********************************************************************************
+		mov     I2CM_port_buf,#%0111     ;Set RA in/out directions
+		mov	I2CM_num_bytes,#$ff
+		mov	I2CM_index,#$ff
+		mov	I2CM_address,#eeprom_addr ; Set the address of the EEPROM
+		retp		
+
+;**************************************************************************
+org	$600	; Miscellaneous Subroutines
+
+;**************************************************************************
+delay_n_ms
+; This subroutine delays 'w' milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 1ms
+	mov	timer_h,#$0fe
+	mov	timer_l,#$0cd
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;*********************************************************************
+; Initialization Code...
+;*********************************************************************
+init
+		mov	m,#$0e			; Initialize pullups on port A
+		mov	!ra,#%1100		; for I2C
+		mov	m,#$0f
+		mov     ra,#%1000              	; Initialize data latches for
+		mov	!ra,#%0111		; port A.
+		mov     rb,#%11111111          	; Initialize data latches for
+		mov	!rb,#%10111111		; port B.
+		call	@zero_ram
+		bank	I2CM
+		call	@I2CM_init
+		bank	I2CS
+		call	@I2CS_init
+		mov     !option,#%00011111      ;enable rtcc interrupt and wreg
+		retp
+;*********************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;**************************************************************************
+; Subroutine - Get byte via serial port and echo it back to the serial port
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in rx_byte
+;**************************************************************************
+get_byte     	jnb     rx_flag,$		;wait till byte is received
+		clrb    rx_flag		;reset the receive flag
+		bank	serial
+		mov     byte,rx_byte		;store byte (copy using W)
+						; & fall through to echo char back
+		retp
+;**************************************************************************
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;**************************************************************************
+send_byte    	bank    serial
+
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;**************************************************************************
+send_string	bank	serial
+ 		mov     string,w                ;store string address
+:loop        	mov     w,string                ;read next string character
+		mov     m,#3                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ;reset the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		RETP                            ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+;**************************************************************************
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+;**************************************************************************
+uppercase    	csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+; Subroutine - Output a hex number
+; INPUTS:
+;	w	-	The byte to be output
+;**************************************************************************
+send_hex
+	mov	temp,w
+	swap	wreg
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	mov	w,temp
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	retp
+;**************************************************************************
+get_hex
+;	This routine returns with an 8-bit value in the W and in the hex 
+;	register.  It accepts a hex number from the terminal screen and
+;	returns.
+;**************************************************************************
+	bank	serial
+
+	mov	w,#_enter_hex
+	call	@send_string
+	call	:get_valid_hex
+	mov	w,byte			; send the received (good) byte
+	call	send_byte
+	swap	temp			; put the nybble in the upper nybble of
+	mov	w,temp
+	mov	hex,w			; hex register
+
+	call	:get_valid_hex
+	mov	w,byte			; send the second received byte
+	call	send_byte
+	mov	w,temp			
+	and	w,#$0f
+	or	w,hex
+	mov	hex,w
+	retp
+
+	;*******
+	:get_valid_hex	; Part of get_hex subroutine.
+	;*******
+:gh1
+	clr	temp
+	jnb	rx_flag,$		; get a byte from the terminal
+	clrb	rx_flag
+	mov	byte,rx_byte
+	call	uppercase		; uppercase it.
+:loop
+	mov	w,temp			; get the value at temp (index)
+	call	hex_table
+	xor	w,byte
+	snz				; compare it to the received byte
+	ret
+	inc	temp			; if they are equal, we have the
+	jb	temp.4,:gh1		; upper nybble.  Continue if not.
+	jmp	:loop			
+ret
+;**************************************************************************
+hex_table
+;**************************************************************************
+	add	pc,w
+	retw	'0'
+	retw	'1'
+	retw	'2'
+	retw	'3'
+	retw	'4'
+	retw	'5'
+	retw	'6'
+	retw	'7'
+	retw	'8'
+	retw	'9'
+	retw	'A'
+	retw	'B'
+	retw	'C'
+	retw	'D'
+	retw	'E'
+	retw	'F'
+;**************************************************************************

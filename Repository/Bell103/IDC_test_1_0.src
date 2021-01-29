@@ -1,0 +1,265 @@
+;******************************************************************************
+; Copyright © [01/25/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+ ;Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;
+; Filename:	simple_fsk_rcv.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.02
+;
+; Date:		January 25, 1999.
+;
+; Part:		SX28AC rev. 2.5
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.0
+;
+; Version:	1.02
+;
+; Program Description:	This is simple software to demonstrate the concept of 
+;			converting an incoming frequency to a data train.  This 
+;			program simply watches the incoming frequency and outputs
+;			a high or a low to the RS-232 TX pin.  For this reason, the
+;			PC that the board is connected to must be set to the desired
+;			baud rate.  Example:  If a 300,N,8,1 settings are desired, 
+;			simply set the PC's terminal program to these settings and
+;			the SX modem will act as a simple frequency-voltage converter,
+;			translating the incoming frequency (1300Hz and 2100Hz) to 
+;			an output voltage which the computer will receive as a 300,N,8,1
+;			data packet.  Once the modem is connected, simply press a key
+;			on the keyboard to get it to pick up and begin receiving.
+;
+; Revision History:  	1.0  Drew out the FSK receive code from the rest of the code
+;		 	surrounding it in the old modem demo software and implemented
+;			it as a module by itself (December 17, 1998)
+;			1.01 Added more documentation to the software for web-posting.
+;			(January 25, 1999)
+;			1.02 Added support for rev 1.4 boards (2/23/99)
+;
+;	INPUTS:
+;	FSK input on fsk_rx_pin (rb.1) (Signal must be amplified until clipping
+;		to overcome Schmitt Trigger inputs.)
+;	RS-232 input on rx_pin (ra.1)
+;
+;	OUTPUTS:
+;	Received RS-232 characters on tx_pin (ra.2)
+;	LED flashes while receiving on led_pin (rb.0)
+;
+;	RESOURCES:
+;       Program memory: 67 Words
+;       Data memory:	3 bytes
+;       I/O Count:	3-5	(Some may be optional)
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+		device	pins28,pages2,banks8		; 28-pin device, 1 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'SFSKRX10'			; Version = 1.01
+
+		reset	reset_entry			; JUMP to reset_entry label on reset
+
+;******************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;******************************************************************************
+
+	watch	fsk_trans_count,8,udec	; counts the delay between transitions
+	watch	fsk_average,8,udec
+	watch	fsk_last_trans_count,8,udec
+	watch	fsk_rx_bit,1,ubin
+	watch	fsk_rb_past_state,8,uhex
+;******************************************************************************
+; Macros (These only required on SX DTMF DEMO board)
+;******************************************************************************
+; oldboard		; Uncomment this if board is not marked rev 1.4 or uses
+			; a DIP SX package.			
+disable_o	macro	0		; This macro disables the output
+	ifdef	oldboard
+		setb	in_out		; switch on the new modem boards.
+	else
+		clrb	in_out
+	endif
+		clr	flags
+		endm
+
+;******************************************************************************
+; Equates for FSK reception
+;******************************************************************************
+glitch_th		equ	10	; The threshold which defines a glitch (small spike which should be ignored)
+bell_103org_low_count_error_th	equ	90	; The lowest count allowed for a high frequency
+bell_103org_low_high_th		equ	130	; The lowest count allowed for a low frequency
+bell_103org_high_count_error_th	equ	180	; The highest count allowed for a low frequency
+
+;******************************************************************************
+; Pin Definitions (These definitions are for SX DTMF DEMO boards)
+;******************************************************************************
+
+rx_pin		equ	ra.1		; RS-232 Input pin
+tx_pin		equ	ra.2		; RS-232 Output pin
+in_out		equ	ra.3		; Switches between output
+					; and input on SX DTMF DEMO boards.
+	
+cntrl_1		equ	ra.2
+cntrl_3		equ	ra.5
+led_pin		equ	rb.0		; Flashes while characters are
+					; being received.
+hook		equ	rb.4		; Goes on/off-hook.
+test_pin	equ	rc.7
+
+;******************************************************************************
+; Global Variables
+;******************************************************************************
+		org	$8		; Global registers
+
+flags			ds	1
+	fsk_rx_en	equ	flags.0 ; Enables the FSK receiver.
+
+;******************************************************************************
+; Bank 0 Variables
+;******************************************************************************
+		org	$10
+
+fsk_receive_bank	=	$
+
+	fsk_flags		ds	1		; This register holds the state of the fsk_receive
+		fsk_answering equ fsk_flags.0
+	fsk_trans_count		ds	1		; This register counts the number of counts 
+							; between transitions at the pin
+	fsk_rb_past_state 	ds	1		; This register keeps track of the previous 
+							; state of port RB, to watch for transitions
+	fsk_average		ds	1
+	fsk_rx_bit		ds	1
+	fsk_last_trans_count	ds	1
+;******************************************************************************
+; Interrupt
+		org	$0			; The interrupt Service routine starts at location zero.
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+		snb	fsk_rx_en
+		call	@FSK_RECEIVE
+;******************************************************************************
+:ISR_DONE
+; This is the end of the interrupt service routine.  Now load 163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;******************************************************************************
+; End of the Interrupt Service Routine
+;******************************************************************************
+
+;******************************************************************************
+reset_entry
+; Program Starts Here on Power Up
+;******************************************************************************
+		mov	m,#$0c			; Initialize SX.
+		mov	!rb,#%11111111		; enable Schmidt trigger on rb1 (for FSK receive)
+
+		mov	m,#$0f			
+		mov	 ra,#%0110		; init ra
+		mov	!ra,#%0010		; ra0-1 = input, ra2-3 = output
+		mov	 rb,#%00000000		; init rb
+		mov	!rb,#%11001010		; rb1 = FSK input, rb0 = output for LED,rb5 = hook
+		mov	!rc,#%01111111		; rb1 = FSK input, rb0 = output for LED,rb5 = hook
+		clrb	hook			; go on hook.
+		setb	led_pin			; turn on LED
+		clr	flags			; Clear all flags
+
+		disable_o			
+
+		setb	hook			; pick up the line
+		setb	fsk_rx_en		; enable the FSK receiver
+
+		bank	fsk_receive_bank
+		setb	fsk_rx_en
+		setb	fsk_answering
+		mov	!option,#%00011111	; enable wreg and rtcc interrupt
+		setb	cntrl_1
+		clrb	cntrl_3
+		
+
+main
+		movb	tx_pin,fsk_rx_bit
+		movb	test_pin,fsk_rx_bit
+		
+		jmp	main			; jump here forever (ISR does all the work)
+
+org	$200
+;******************************************************************************
+FSK_RECEIVE
+		bank	fsk_receive_bank	; switch to fsk_receive_bank of RAM
+
+		inc	fsk_trans_count		; Increment the transition count
+		clc
+		mov	w,fsk_rb_past_state	; Check for a transition
+		xor	w,rb
+		and	w,#%00000010
+		snz
+		retp				; return if there has been no transition
+		xor	fsk_rb_past_state,w	; save the new value of the FSK_pin
+		jb	fsk_answering,:answering
+
+:originating
+		mov	w,fsk_trans_count	; add the new transition count to the last average
+		add	fsk_average,w		
+		rr	fsk_average		; and divide by two.
+		clr	fsk_trans_count		; clear the transition count to count up to next transition.
+		mov	w,#-130
+		add	w,fsk_average		; If fsk_trans_count>=130, there will be a carry (low_frequency, high rx_bit)		
+		setb	fsk_rx_bit		; set fsk_rx_bit if low frequency, otherwise clear it.
+		sc
+		clrb	fsk_rx_bit
+		clr	fsk_trans_count
+		retp
+:answering
+		mov	w,fsk_trans_count	; add the new transition count to the last transition count
+		add	w,fsk_last_trans_count
+		add	fsk_average,w		; add the sum to the last average
+		rr	fsk_average		; and divide by two
+		mov	fsk_last_trans_count,fsk_trans_count ; save this transition count
+		mov	w,#-144			; If fsk_trans_count>=144, there will be a carry (low_frequency, high rx_bit)
+		add	w,fsk_average		
+		setb	fsk_rx_bit		; set fsk_rx_bit if low frequency, otherwise clear it.
+		sc
+		clrb	fsk_rx_bit
+		clr	fsk_trans_count
+		retp
+;******************************************************************************
+;        Copyright © 1998 Scenix Semiconductor, Inc. All rights
+;        reserved.
+;        
+;        Scenix Semiconductor, Inc. assumes no responsibility or liability for
+;        the use of this [product, application, software, any of these products].
+;        
+;        Scenix Semiconductor conveys no license, implicitly or otherwise, under
+;        any intellectual property rights.
+;        Information contained in this publication regarding (e.g.: application,
+;        implementation) and the like is intended through suggestion only and may
+;        be superseded by updates. Scenix Semiconductor makes no representation
+;        or warranties with respect to the accuracy or use of these information,
+;        or infringement of patents arising from such use or otherwise.
+;        
+;        Scenix Semiconductor products are not authorized for use in life support
+;        systems or under conditions where failure of the product would endanger
+;        the life or safety of the user, except when prior written approval is
+;        obtained from Scenix Semiconductor.
+;******************************************************************************

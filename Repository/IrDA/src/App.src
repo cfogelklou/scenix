@@ -1,0 +1,410 @@
+AppInfoSeg		MACRO
+;********************************************************************************
+;  APP LAYER
+;********************************************************************************
+;
+;	lmp2appRxCommData(w = Data)			;Incomming data bytes
+;	lmp2appRxCommValid()				;Data bytes passed since last Valid/Error message are valid
+;	lmp2appRxCommError()				;Data bytes passed since last Valid/Error message are invalid and should be discarded
+;
+;	lmp2appTxCommStart(ret z=None)			;Data bytes can now be sent, Return Z=false if data to be sent
+;	lmp2appTxCommData(ret w=TxData, z=Last)		;Data bytes can now be sent. Set Z if this is the last byte to be sent
+;	lmp2appTxCommValid()				;All data passed since last Valid/Error message were acknowledged as received by the remote station
+;	lmp2appTxCommError()				;All data passed since last Valid/Error message were discarded and will need to be sent again
+;
+;	lap2appRxUIData(w = Data)			;Incomming UI data bytes (outside of a connection only)
+;	lap2appRxUIValid()				;Data bytes passed since last Valid/Error message are valid
+;	lap2appRxUIError()				;Data bytes passed since last Valid/Error message are invalid and should be discarded
+;
+;	app2lapTxUIFrame(ret z=Busy)
+;	lap2appTxUIData(ret w=TxData, z=Last)
+;	lap2appTxUIComplete()
+;
+;	app2lapDiscoveryRequest(ret z=Busy)
+;
+;********************************************************************************
+			ENDM
+
+
+AppCommSX2PCCodeSeg	MACRO
+;********************************************************************************
+;  APP LAYER - CommSX2PC
+;********************************************************************************
+
+appBank		= 	$F0
+
+appTxState	=	appBank + 0		;Current transmission type
+appTxPosition	=	appBank + 1		;Current transmission position
+appTxBank	=	appBank + 2		;Current transmission position
+appRxData	=	appBank + 3		;Current received byte
+
+appTxStrState	=	1
+appTxRegState	=	2
+appTxPortState	=	3
+
+;********** Return **********
+
+appReturn	retp
+
+;********** a2appReset **********
+
+a2appReset
+	bank	appBank
+	clr	appTxState
+	retp
+
+;********** lmp2appRxCommData **********
+
+lmp2appRxCommData					;Incomming data bytes
+	bank	appBank
+	mov	appRxData, w				;Store data (if more bytes are received in frame then only last byte is reconised)
+	retp
+
+;********** lmp2appRxCommValid **********
+
+lmp2appRxCommValid					;Data bytes passed since last Valid/Error message are valid
+	bank	appBank
+	test	appTxState				;Currently not sending anything ?
+	sz
+	retp						;Already sending a frame => ignore command
+	debugf	1, appRxData				;Show command out debug port
+	csne	appRxData, #'?'				;Is the command '?' ?
+	jmp	:Str					;Yes => prepare to transmit a string
+	csne	appRxData, #'r'				;Is the command 'r' ?
+	jmp	:Reg					;Yes => prepare to transmit registers
+	csne	appRxData, #'c'				;Is the command 'c' ?
+	jmp	:Port					;Yes => prepare to transmit port c contents
+	retp
+:Str	mov	appTxState, #appTxStrState		;Will send string
+	retp
+:Reg	mov	appTxState, #appTxRegState		;Will send registers
+	clr	appTxBank				;Clear TxBank ready for transmission
+	retp
+:Port	mov	appTxState, #appTxPortState		;Will send port c
+	retp
+
+;********** lmp2appRxCommError **********
+
+lmp2appRxCommError					;Data bytes passed since last Valid/Error message are invalid and should be discarded
+	retp
+
+;********** lmp2appTxCommStart **********
+
+lmp2appTxCommStart					;Data bytes can now be sent. Return Z = flase if data to be sent
+	bank	appBank
+	clr	appTxPosition				;Clear TxPosition ready for transmission
+	test	appTxState				;Return z=false if TxState not 0 to indicate data to be sent
+	retp
+
+;********** lmp2appTxCommData **********
+
+lmp2appTxCommData					;Data bytes can now be sent. If there is data available then return data byte and set Last (z) to false
+	bank	appBank
+	mov	w, appTxState				;Jump based on state
+	jmp	PC+w
+	retp						;0 = Invalid
+	jmp	appTxStrData				;1 = appTxStrState
+	jmp	appTxRegData				;2 = appTxRegState
+	jmp	appTxPortData				;3 = appTxPortState
+
+appTxStrData
+	mov	m, #_lmpIASDeviceNameText / 256		;Pointer to string (high)
+	mov	w, #_lmpIASDeviceNameText		;Pointer to string (low)
+	add	w, appTxPosition			;index into string
+	inc	appTxPosition				;Increment offset for next byte
+	iread						;Read data from ROM
+	mov	Temp, w					;Store data
+	mov	w, m					;Move high part of data to w
+	test	w					;Is this the last byte ?
+	jnz	:Last					;Yes => indicate last
+:More	mov	w, Temp					;No  => indicate more. Recover data to pass
+	clz						;Indicate more data to follow Data
+	retp						;Return data
+:Last	mov	w, Temp					;Data to pass
+	stz						;Indicate last byte
+	retp						;Return data
+
+appTxRegData
+	mov	w, #$10					;w = $10
+	add	w, appTxBank				;w = current bank (starting from $10)
+	add	w, appTxPosition			;w = pointer to current register
+	mov	FSR, w					;Apply pointer
+	mov	Temp, INDF				;Obtain data from register
+	bank	appBank
+	csne	appTxPosition, #$0F			;Last byte to be transmitted in frame ?
+	jmp	:Last					;Yes => indicate last
+:More	inc	appTxPosition				;No  => indicate more. Increment position fo next data byte
+	mov	w, Temp					;Recover data to send
+	clz						;Indicate more data to follow
+	retp
+:Last	mov	w, Temp					;Recover data to send
+	stz						;Indicate last byte
+	retp
+
+appTxPortData
+	mov	w, rc					;Return contents of port c
+	stz						;Indicate no more data to send
+	retp						;Return data
+
+;********** lmp2appTxCommValid **********
+
+lmp2appTxCommValid					;All data passed since last Valid/Error message were acknowledged as received by the remote station
+	bank	appBank
+	csne	appTxState, #appTxRegState		;Currently transmitting registers ?
+	jmp	:Reg					;Yes => send more registers (multi frame)
+	clr	appTxState				;No  => finished transmitting, return to idle state
+	retp
+:Reg	add	appTxBank, #$20				;Add $20 for next bank
+	sz						;Back to starting bank ?
+	retp						;No  => more data to send, stay in this state
+	clr	appTxState				;Yes => finished transmitting, return to idle state
+	retp
+
+;********** lmp2appTxCommError **********
+
+lmp2appTxCommError					;All data passed since last Valid/Error message were discarded and will need to be sent again
+	retp						;Stay in current state for retransmission
+
+;********** UI Frames **********
+
+lap2appRxUIData		=	appReturn
+lap2appRxUIValid	=	appReturn
+lap2appRxUIError	=	appReturn
+lap2appTxUIData		=	appReturn
+lap2appTxUIComplete	=	appReturn
+
+;********** Uart **********
+
+a2appRxAvail
+	bank	IsrBank
+	clrb	UartRxAvail				;Clear flag
+	retp
+
+;********************************************************************************
+			ENDM
+
+AppCommTransCodeSeg	MACRO
+;********************************************************************************
+;  APP LAYER - CommTrans
+;********************************************************************************
+
+appBank		= 	$F0
+
+appHeadPtr	=	appBank + 0		;1 byte
+appTailPtr	=	appBank + 1		;1 byte
+appData		=	appBank + 2		;8 bytes
+
+;********** Return **********
+
+appReturn	retp
+
+;********** a2appReset **********
+
+a2appReset
+	bank	appBank
+	clr	appHeadPtr				;Init buffer head pointer
+	clr	appTailPtr				;Init buffer tail pointer
+	retp
+
+;********** lmp2appRxCommData **********
+
+lmp2appRxCommData					;Incomming data bytes
+	debug	1					;Show data out debug port
+	retp
+
+;********** lmp2appRxCommValid **********
+
+lmp2appRxCommValid					;Data bytes passed since last Valid/Error message are valid
+	retp
+
+;********** lmp2appRxCommError **********
+
+lmp2appRxCommError					;Data bytes passed since last Valid/Error message are invalid and should be discarded
+	retp
+
+;********** lmp2appTxCommStart **********
+
+lmp2appTxCommStart					;Data bytes can now be sent. Return Z = flase if data to be sent
+	bank	appBank
+	mov	w, appHeadPtr				;Compare head pointer with tail pointer
+	xor	w, appTailPtr				;Z is true if they match => indicating no data to send
+	retp						;Z is false if they do not match indicating data to send
+
+;********** lmp2appTxCommData **********
+
+lmp2appTxCommData					;Data bytes can now be sent. If there is data available then return data byte and set Last (z) to false
+	bank	appBank
+	mov	w, #appData				;Pointer to first byte of data
+	add	w, appTailPtr				;Index into buffer
+	mov	FSR, w					;Apply pointer
+	mov	Temp, INDF				;Read byte out of buffer
+	bank	appBank
+	inc	appTailPtr				;move on tail ptr
+	and	appTailPtr, #%00000111			;3 bit counter
+	mov	w, appHeadPtr				;Compare head pointer with tail pointer
+	xor	w, appTailPtr				;Do they match (indicating no more data)
+	jz	:Last					;Yes => no more data
+:More	mov	w, Temp					;No  => more data. Recover data
+	clz						;Indicate more data to follow
+	retp						;Return data
+:Last	mov	w, Temp					;Recover data
+	stz						;Indicate last byte
+	retp						;Return data
+
+;********** lmp2appTxCommValid **********
+
+lmp2appTxCommValid					;All data passed since last Valid/Error message were acknowledged as received by the remote station
+	retp
+
+;********** lmp2appTxCommError **********
+
+lmp2appTxCommError					;All data passed since last Valid/Error message were discarded and will need to be sent again
+	retp
+
+;********** UI Frames **********
+
+lap2appRxUIData		=	appReturn
+lap2appRxUIValid	=	appReturn
+lap2appRxUIError	=	appReturn
+lap2appTxUIData		=	appReturn
+lap2appTxUIComplete	=	appReturn
+
+;********** Uart **********
+
+a2appRxAvail
+	bank	IsrBank
+	mov	Temp, UartRxData		;Store received byte in buffer
+	clrb	UartRxAvail			;Clear flag
+	bank	appBank
+	mov	w, #appData			;Pointer to first byte of data
+	add	w, appHeadPtr			;Index into buffer
+	mov	FSR, w				;Apply pointer
+	mov	INDF, Temp			;Store data
+	bank	appBank
+	inc	appHeadPtr			;Record count
+	and	appHeadPtr, #%00000111		;3 bit position number
+	retp
+
+;********************************************************************************
+			ENDM
+
+AppSX2SXCodeSeg		MACRO
+;********************************************************************************
+;  APP LAYER - SX 2 SX
+;********************************************************************************
+
+appBank		= 	$F0
+
+appTxState	=	appBank + 0		;Current transmission type
+appTxPosition	=	appBank + 1		;Current transmission position
+
+appTxStrState	=	1
+appTxPortState	=	2
+
+;********** Return **********
+
+appReturn	retp
+
+;********** a2appReset **********
+
+a2appReset
+	bank	appBank
+	clr	appTxState
+	retp
+
+;********** lmp2appCommData **********
+
+lmp2appRxCommData	=	appReturn
+lmp2appRxCommValid	=	appReturn
+lmp2appRxCommError	=	appReturn
+
+lmp2appTxCommData	=	appReturn
+lmp2appTxCommValid	=	appReturn
+lmp2appTxCommError	=	appReturn
+
+lmp2appTxCommStart
+	stz
+	retp
+
+;********** UI Frames - Rx **********
+
+lap2appRxUIData
+	debug	1					;Show data
+	retp
+
+lap2appRxUIValid
+	retp
+
+lap2appRxUIError
+	retp
+
+;********** UI Frames - Tx **********
+
+lap2appTxUIData
+	bank	appBank
+	mov	w, appTxState				;Jump based on state
+	jmp	PC+w
+	retp						;0 = Invalid
+	jmp	appTxStrData				;1 = appTxStrState
+	jmp	appTxPortData				;2 = appTxPortState
+
+appTxStrData
+	mov	m, #_lmpIASDeviceNameText / 256		;Pointer to string (high)
+	mov	w, #_lmpIASDeviceNameText		;Pointer to string (low)
+	add	w, appTxPosition			;index into string
+	inc	appTxPosition				;Increment offset for next byte
+	iread						;Read data from ROM
+	mov	Temp, w					;Store data
+	mov	w, m					;Move high part of data to w
+	test	w					;Is this the last byte ?
+	jnz	:Last					;Yes => indicate last
+:More	mov	w, Temp					;No  => indicate more. Recover data to pass
+	clz						;Indicate more data to follow Data
+	retp						;Return data
+:Last	mov	w, Temp					;Data to pass
+	stz						;Indicate last byte
+	retp						;Return data
+
+appTxPortData
+	mov	w, rc					;Return contents of port c
+	stz						;Indicate no more data to send
+	retp						;Return data
+
+lap2appTxUIComplete
+	bank	appBank
+	retp
+
+;********** Uart **********
+
+a2appRxAvail
+	bank	IsrBank
+	mov	Temp, UartRxData			;Store received byte in Temp
+	clrb	UartRxAvail				;Clear data available flag
+	bank	appBank
+	debugf	1, Temp					;Show command
+	csne	Temp, #'d'				;Was the byte a 'd'
+	jmp	:XID					;Yes => request discovery
+	csne	Temp, #'s'				;Was the byte a 's'
+	jmp	:STR					;Yes => send the broadcast string
+	csne	Temp, #'c'				;Was the byte a 'c'
+	jmp	:PORT					;Yes => send contents of port c
+	retp
+:XID	pcall	app2lapDiscoveryRequest			;Request discovery
+	mov	w, #'^'					;Assume accepted (zero false)
+	snz						;Was the request accepted ?
+	mov	w, #'!'					;No => refused
+	debug	1					;Send character out the debug port for the user
+	retp
+:STR	mov	appTxState, #appTxStrState		;Will send string
+	clr	appTxPosition				;Reset position
+	jmp	:Send
+:PORT	mov	appTxState, #appTxPortState		;Will send port
+:Send	pcall	app2lapTxUIStart
+	mov	w, #'^'					;Assume accepted (zero false)
+	snz						;Was the request accepted ?
+	mov	w, #'!'					;No => refused
+	debug	1					;Send character out the debug port for the user
+	retp
+	
+;********************************************************************************
+			ENDM

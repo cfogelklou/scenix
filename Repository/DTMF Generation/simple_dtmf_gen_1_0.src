@@ -1,0 +1,571 @@
+;******************************************************************************
+; Copyright © [09/25/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+ ;Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;       Simple DTMF Generator
+;
+;
+;       Authors: Chris Fogelklou, Scenix Semiconductor Inc.
+;       Written: 25/9/99
+;
+;	This program demonstrates the use of two sine wave generators to create
+;	DTMF tones.  It is written to run on the Scenix Modem Demo-Boards,
+;	marked rev. 1.2.  This program was written for easy-understanding, not
+;	code efficiency or DTMF quality.  Check the modem application notes
+;	for more efficient programming with higher-quality output signals.
+;	This program was tested to work on a phone-line simulator and on an
+;	analog phone line in Mountain View, CA.
+;	
+;	History:
+;	Version 1.00:  Original program written to make use of a different,
+;			easier to understand sine-generation algorithm than
+;			previous DTMF generation code.  This program is
+;			written to co-incide with the flowcharts from the
+;			embedded systems class on implementing Telephony
+;			functions in an 8-bit microcontroller.
+;
+;	Inputs:
+;	NONE
+;
+;	Outputs:
+;	DTMF output on PDM_pin (ra.0).
+;	Dials a number stored in an internal table.
+;
+; 	Resources used:
+;	Interrupt Rate:	3.26us
+;       Program memory:	$D6 == 214 words
+;       Data memory:	18 bytes
+;       I/O Count:	To be used on the Scenix Modem Demonstration Board, Rev 1.2
+;			For schematics, see www.scenix.com
+;	Simplified Schematics for DTMF dialing only:
+;
+;						   
+;	|---------------|			   
+;	|		|ra.0		      
+;	|		|--------------> To low-pass filter and DAA circuitry
+;	|		|
+;	|	SX	|rb.4
+;	|		|--------------> To active-low hook relay
+;	|		|
+;	|		|
+;	|		|
+;	|---------------|
+;
+;
+;******************************************************************************
+;******************************************************************************
+;	PROGRAM DEFINES
+;******************************************************************************
+ SX28L_assembler; Uncomment this line to use this program with the SX28L assembler
+ rev_2_0	; Uncomment this line to use on the IDC boards (rev 2.0)
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+IFDEF SX28L_assembler
+		device	SX28L,oscxt4			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+		device	pins28,pages4,banks8		; 28-pin device, 1 pages, 8 banks of RAM
+		device	oschs,turbo,optionx,stackx	; High speed oscillator, turbo mode,
+ENDIF							; option register extend, 8-level stack
+		freq	50_000_000			; default run speed = 50MHz
+		ID	'DTMFOUT1'			; Version = 1.0
+
+		reset	reset_entry			; JUMP to reset_entry label on reset
+;**************************************************************************
+; Watches (For Debug in SX_Key software V.1.0 +)
+;**************************************************************************
+watch	temp,8,udec
+;**************************************************************************
+; MACROS
+;**************************************************************************
+	
+;**************************************************************************
+; The constant = 2^n * Ts * FREQ, 
+; where n is the number of bits in the phase accumulator for each
+; signal generator, Ts is the sample rate, and FREQ is the desired
+; output frequency.
+; We know that the phase accumulator (phase_acc) is 16 bits, so n = 16
+; We will choose a phase update rate of 19.2kHz, every 16th pass of the ISR
+; = 1/([cyclesperinterupt] * [instructiontime] * [ISR passes]) 
+; = 1/(163 * 20ns * 16 passes)
+; Therefore, the constant = 2^n * (1/Fs) * FREQ
+; Therefore, the constant = 2^16 * (3.26us * 16) * FREQ
+; Therefore, the constant = 3.41835776 * OUTPUT FREQUENCY
+; Convert the result of the calculation to a hexadecimal number and load
+; the upper byte into the phase_acc_h register and the lower byte 
+; into the phase_acc_l accumulator.  Example:
+; for 697Hz, constant = 697 * 3.41835776 = 2383 ==> hex = $094f
+; therefore, for 697Hz signal, load 
+; phase_acc_h = $09 
+; phase_acc_l = $4f
+;**************************************************************************
+f697_h		equ	$09	; DTMF Frequency
+f697_l		equ	$4f
+
+f770_h		equ	$0a	; DTMF Frequency
+f770_l		equ	$48
+
+f852_h		equ	$0b	; DTMF Frequency
+f852_l		equ	$60
+
+f941_h		equ	$0c	; DTMF Frequency
+f941_l		equ	$91
+
+f1209_h		equ	$10	; DTMF Frequency
+f1209_l		equ	$25
+
+f1336_h		equ	$11	; DTMF Frequency
+f1336_l		equ	$d7
+
+f1477_h		equ	$13	; DTMF Frequency
+f1477_l		equ	$69
+
+f1633_h		equ	$15	; DTMF Frequency
+f1633_l		equ	$ce
+
+d_1		equ	$00	; The index into a table of frequency constants to dial a '1'
+d_2		equ	$01	; The index into a table of frequency constants to dial a '2'
+d_3		equ	$02	; The index into a table of frequency constants to dial a '3'
+d_A		equ	$03	; The index into a table of frequency constants to dial a 'A'
+d_4		equ	$04	; The index into a table of frequency constants to dial a '4'
+d_5		equ	$05	; The index into a table of frequency constants to dial a '5'
+d_6		equ	$06	; The index into a table of frequency constants to dial a '6'
+d_B		equ	$07	; The index into a table of frequency constants to dial a 'B'
+d_7		equ	$08	; The index into a table of frequency constants to dial a '7'
+d_8		equ	$09	; The index into a table of frequency constants to dial a '8'
+d_9		equ	$0a	; The index into a table of frequency constants to dial a '9'
+d_C		equ	$0b	; The index into a table of frequency constants to dial a 'C'
+d_star		equ	$0c	; The index into a table of frequency constants to dial a '*'
+d_0		equ	$0d	; The index into a table of frequency constants to dial a '0'
+d_hash		equ	$0e	; The index into a table of frequency constants to dial a '#'
+d_D		equ	$0f	; The index into a table of frequency constants to dial a 'D'
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+PDM_pin		equ	ra.0	; D/A output pin
+rx_pin		equ	ra.1	; RS-232 reception pin
+tx_pin		equ	ra.2	; RS-232 transmission pin
+nothing		equ	ra.3	; N/C
+ra_dir_mask	equ	%11111010	; sets up the I/O directions of port ra
+ra_data_mask	equ	%11111111	; sets up the output levels of the output pins on ra
+
+led_pin		equ	rb.0	; LED pin
+rxa_pin		equ	rb.1	; FSK receive pin
+cntrl_1		equ	rb.2	; drive cntrl_1 low to disable the output of the LPF
+ring		equ	rb.3	; ring detection pin
+hook		equ	rb.4	; drive hook low to go off-hook
+cntrl_3		equ	rb.5	; drive cntrl_3 low to disable the output of the HPF
+rts		equ	rb.6	; indicates to the SX that the PC wants to transmit data
+cts		equ	rb.7	; indicates to the PC that the SX is ready to receive data
+rb_dir_mask	equ	%01101110	; sets up the I/O directions of port rb
+rb_data_mask	equ	%01011011	; sets up the output levels of the output pins on ra
+
+dtmf_in_pin	equ	rc.0
+dtmf_fdbk_pin	equ	rc.1
+AtoD_in_pin	equ	rc.2
+AtoD_fdbk_pin	equ	rc.3
+imp_450_pin	equ	rc.4
+imp_600_pin	equ	rc.5
+imp_750_pin	equ	rc.6
+imp_900_pin	equ	rc.7
+rc_dir_mask	equ	%11010101	; sets up the I/O directions of port rc
+rc_data_mask	equ	%00001111	; sets up the output levels of the output pins on ra
+
+;**************************************************************************
+; Global Variables
+;**************************************************************************
+		org	$8
+
+flags	ds	1
+	timer_flag	equ	flags.0
+temp	ds	1
+temp2	ds	1
+;**************************************************************************
+; Variables
+;**************************************************************************
+		org	$10
+
+sine_gen_bank	=	$
+
+phase_acc1_l	ds	1	; 16-bit phase accumulator 
+phase_acc1_h	ds	1	; stores the current phase of the signal
+freq1_l		ds	1	; 16-bit value determines the present
+freq1_h		ds	1	; frequency of the signal
+freq_timer	ds	1
+phase_acc2_l	ds	1	; 16-bit phase accumulator 
+phase_acc2_h	ds	1	; stores the current phase of the signal
+freq2_l		ds	1	; 16-bit value determines the present
+freq2_h		ds	1	; frequency of the signal
+
+D_to_A_bank	=	$
+
+D_to_A_val	ds	1	; current D/A output
+PDM_acc		ds	1	; accumulator stores the phase of the
+				; PDM accumulator
+
+timers		=	$	; 16-bit timer
+timer_l		ds	1
+timer_h		ds	1
+
+
+LED_bank	=	$
+led_timer_l	ds	1
+led_timer_h	ds	1
+
+;**************************************************************************
+; BEGINNING OF PROGRAM SPACE
+;**************************************************************************
+	org	$0		
+
+;**************************************************************************
+; INTERRUPT SERVICE ROUTINE
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us, or at a frequency of 306.748kHz
+;**************************************************************************
+	call	D_to_A_output		; output the last D_to_A value
+
+	inc	freq_timer		; divide the sine generator's
+	mov	w,freq_timer		; sample rate down to 19200Hz
+	and	w,#$0f			; by only running it on every
+	jnz	:no_processing		; 16th pass of the ISR.
+
+	; Time for a new sample.  Run the sine generators.
+	call	sine_generator_1
+	bank	D_to_A_bank
+	mov	D_to_A_val,w
+	call	sine_generator_2	
+	bank	D_to_A_bank
+	add	D_to_A_val,w
+	add	D_to_A_val,#128		; add 128 to the result to center the
+					; output at 2.5VDC.  255 is full-scale
+					; output and 0 is minimum output.
+
+:no_processing
+	call	do_timers		; run the 16-bit timer
+	call	flash_led		; flash the LED
+	mov	w,#-163			; re-interrupt 163 clock cycles from this one.
+	retiw				; for an interrupt frequency of 306.748kHz
+					; at a 50MHz clock frequency.
+;**************************************************************************
+; END OF THE INTERRUPT SERVICE ROUTINE
+;**************************************************************************
+
+
+
+
+;**************************************************************************
+; TABLES FOR DTMF GENERATION VIRTUAL PERIPHERAL
+;**************************************************************************
+sine_table_1
+; This table contains values used to generate a sine wave with peak
+; amplitudes of +/- 32
+;**************************************************************************
+	jmp	pc+w				; get value at the offset in w
+	retw	0				; and return with this value in w.
+	retw	12
+	retw	23
+	retw	30
+	retw	32
+	retw	30
+	retw	23
+	retw	12
+	retw	0
+	retw	-12
+	retw	-23
+	retw	-30
+	retw	-32
+	retw	-30
+	retw	-23
+	retw	-12
+;**************************************************************************
+sine_table_2
+; This table contains values used to generate a sine wave with peak
+; amplitudes of +/- 40
+;**************************************************************************
+	jmp	pc+w				; get value at the offset in w
+	retw	0
+	retw	15
+	retw	28
+	retw	37
+	retw	40
+	retw	37
+	retw	28
+	retw	15
+	retw	0
+	retw	-15
+	retw	-28
+	retw	-37
+	retw	-40
+	retw	-37
+	retw	-28
+	retw	-15
+;**************************************************************************
+; END OF DTMF GENERATION TABLES
+;**************************************************************************
+
+
+
+
+
+;**************************************************************************
+; INTERRUPT SERVICE ROUTINE SUBROUTINES
+;**************************************************************************
+D_to_A_OUTPUT
+; This outputs a digital value equivalent to the value in D_to_A_val the
+; Pulse Density Modulation pin.
+;**************************************************************************
+	bank	D_to_A_bank
+	add	PDM_acc,D_to_A_val
+	snc
+	setb	PDM_pin
+	sc
+	clrb	PDM_pin
+		
+D_to_A_out	ret
+;**************************************************************************
+sine_generator_1
+;	This subroutine generates a signal corresponding to the values in
+;	the 16 value signal_table
+;**************************************************************************
+	bank	sine_gen_bank
+	add	phase_acc1_l,freq1_l	; 16-bit add to the phase 	
+	snc				; accumulators
+	inc	phase_acc1_h
+	add	phase_acc1_h,freq1_h	
+						
+	mov	w,phase_acc1_h		; use upper nybble of
+	swap	wreg			; phase accumulator as index
+	and	w,#$0f			; into 16-number table
+	call	sine_table_1		; get the value at this offset
+					; return with the value in the
+					; w register
+signal_generator_out
+	ret
+;**************************************************************************
+sine_generator_2
+;	This subroutine generates a signal corresponding to the values in
+;	the 16 value signal_table
+;**************************************************************************
+	bank	sine_gen_bank
+	add	phase_acc2_l,freq2_l	; 16-bit add to the phase 	
+	snc				; accumulators
+	inc	phase_acc2_h
+	add	phase_acc2_h,freq2_h	
+						
+	mov	w,phase_acc2_h		; use upper nybble of
+	swap	wreg			; phase accumulator as index
+	and	w,#$0f			; into 16-number table
+	call	sine_table_2		; get the value at this offset
+					; return with the value in the
+					; w register
+signal_generator_out_2
+	ret
+;**************************************************************************
+do_timers
+;**************************************************************************
+	bank	timers
+	inc	timer_l			; increment the low byte of the 16-bit timer
+	snz				
+	inc	timer_h			; if it rolls over, increment the high byte
+	snz				; if it rolls over,
+	setb	timer_flag		; set the flag.
+	ret				; and return
+;**************************************************************************
+flash_led
+;**************************************************************************
+	bank	LED_bank
+	inc	led_timer_l		; increment the low byte of the 16-bit timer
+	snz				
+	inc	led_timer_h		; if it rolls over, increment the high byte
+
+	clr	led_pin
+	snb	led_timer_h.6		; if bit 6 is set, turn the LED on, otherwise,
+					; turn it off.
+	setb	led_pin
+	ret				; and return
+
+
+;**************************************************************************
+dial_it
+;**************************************************************************
+	mov	temp2,w
+
+;****	load freq1_l
+
+	mov	w,>>temp2		; use the upper two bits of the index 
+					; to get the low frequency
+	and	w,#$06
+	call	LOW_TABLE
+	mov	freq1_l,w
+
+;****	load freq1_h
+
+	mov	w,>>temp2
+	and	w,#$06
+	inc	wreg
+	call	LOW_TABLE
+	mov	freq1_h,w
+
+;****	load freq2_l
+
+	mov	w,<<temp2
+	and	w,#$06
+	call	HIGH_TABLE		; use the lower two bits of the index to 
+					; get the high frequency
+	mov	freq2_l,w		
+
+;****	load freq2_h
+
+	mov	w,<<temp2
+	and	w,#$06
+	inc	wreg
+	call	HIGH_TABLE
+	mov	freq2_h,w
+
+	mov	w,#1			; now delay for 100ms while the digit is being 
+					; dialed
+	call	delay_100n_ms
+
+	bank	sine_gen_bank		; disable DTMF generation
+	clr	freq1_l			
+	clr	freq1_h
+	clr	freq2_l
+	clr	freq2_h
+	clr	phase_acc1_l
+	clr	phase_acc1_h
+	clr	phase_acc2_l
+	clr	phase_acc2_h
+
+	mov	w,#1			; delay 100ms
+	call	delay_100n_ms
+
+	ret				; return
+;**************************************************************************
+LOW_TABLE
+;**************************************************************************
+	add	pc,w
+	retw	f697_l
+	retw	f697_h
+	retw	f770_l
+	retw	f770_h
+	retw	f852_l
+	retw	f852_h
+	retw	f941_l
+	retw	f941_h
+;**************************************************************************
+HIGH_TABLE
+;**************************************************************************
+	add	pc,w
+	retw	f1209_l
+	retw	f1209_h
+	retw	f1336_l
+	retw	f1336_h
+	retw	f1477_l
+	retw	f1477_h
+	retw	f1633_l
+	retw	f1633_h
+;**************************************************************************
+zero_ram	
+; Initialize all RAM locations to zero.
+;**************************************************************************
+	CLR	FSR
+:loop
+    	SB      FSR.4                   ; are we on low half of bank?
+	SETB    FSR.3                   ; If so, don't touch regs 0-7
+	CLR     IND                     ; clear using indirect addressing
+	IJNZ    FSR,:loop	        ; repeat until done
+	retp
+;**************************************************************************
+init
+; Initialize the processor.
+;**************************************************************************
+	call	@zero_ram		; initialize ram
+	mov	m,#$0f			; initialize the ports
+	mov	!ra,#ra_dir_mask
+	mov	ra,#ra_data_mask
+	mov	!rb,#rb_dir_mask
+	mov	rb,#rb_data_mask
+	mov	!rc,#rc_dir_mask
+	mov	rc,#rc_data_mask
+
+	mov	m,#$0d			; make all ports CMOS level.
+	mov	!ra,#%0000
+	mov	!rb,#%00000000
+	mov	!rc,#%00000000
+
+	mov	m,#$0f			; point mode register back to
+					; port direction registers
+	mov	!option,#%00011111	; enable wreg and rtcc interrupt
+					; with prescaler assigned to the
+					; watchdog timer.
+	retp
+;**************************************************************************
+delay_100n_ms
+; This subroutine delays 'w'*100 milliseconds. (not exactly, but pretty close)
+; This subroutine uses the TEMP register
+; INPUT		w	-	w/100 milliseconds to delay for.
+; OUTPUT	Returns after 100 * n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	mov	timer_h,#$088	; This loop delays for 100ms
+	mov	timer_l,#$02e
+	clrb	timer_flag	; clear the flag and
+	jnb	timer_flag,$	;   wait until the timer_flag is set.
+	decsz	temp		; and do this w times.
+	jmp	:loop
+	retp
+
+
+
+
+
+
+
+
+
+
+;**************************************************************************
+; Main program
+;**************************************************************************
+reset_entry				; Program goes here on power-up.
+
+	call	@init			; Initialize the processor
+
+	clrb	hook			; go off-hook
+	mov	w,#30			
+	call	delay_100n_ms		; and delay for 3 seconds.
+
+	break				; debug breakpoint here.
+
+	
+	mov	w,#d_9			; dial '9'
+	call	dial_it
+	mov	w,#d_3			; dial '3'
+	call	dial_it
+	mov	w,#d_8			; dial '8'
+	call	dial_it
+	mov	w,#d_2			; dial '2'
+	call	dial_it
+	mov	w,#d_0			; dial '0'
+	call	dial_it
+	mov	w,#d_0			; dial '0'
+	call	dial_it
+	mov	w,#d_0			; dial '0'
+	call	dial_it
+
+:dialing_done
+	jmp	:dialing_done		; loop forever once finished.

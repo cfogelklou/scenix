@@ -1,0 +1,707 @@
+LapInfoSeg		MACRO
+;********************************************************************************
+;  LAP LAYER
+;********************************************************************************
+;
+;Framing Layer Events
+;
+;	fl2lapMediaBusy()				;A byte has been received => the media is busy
+;
+;Payload Layer Events
+;
+;	pl2lapRxFrame(w=Type)				;Incomming frame of given type
+;	pl2lapRxValid()					;Frame was valid
+;	pl2lapRxError()					;Frame was invalid
+;	pl2lapRxXIDData()				;XID data
+;	pl2lapRxIData()					;I data
+;	pl2lapRxUIData()				;UI data
+;	lap2plRxIgnore()				;Tell the framing layer to ignore the frame
+;
+;	lap2plSNRMAccept()				;Accept connection and send reply
+;	lap2plTxXIDCmd(w=Slot)				;Send a XID command frame
+;	lap2plTxXIDRsp()				;Send a XID response frame
+;	lap2plTxSimpleRsp()				;Send simple response frame
+;	lap2plTxIRsp()					;Send an I frame
+;	pl2lapTxIData(ret w=Data ret z=Last) call	;Request for data
+;	pl2lapTxComplete()				;Complete indication
+;
+;	lap2plGenerateNewAddr				;Request that a new 32-bit address be generated
+;
+;LMP Layer Events
+;
+;	lap2lmpConnectIndication() call
+;	lap2lmpDisconnectIndication()
+;	lmp2lapDisconnectRequest()
+;
+;	lap2lmpRxData(w=Data)				;Incomming data bytes
+;	lap2lmpRxValid() call				;Data bytes passed since RxFrame message are valid
+;	lap2lmpRxError() call				;Data bytes passed since RxFrame message are invalid
+;
+;	lap2lmpTxFrame(ret z=None) call			;Lap layer can transmit a i-frame and will do so if z is returned false
+;	lap2lmpTxData(ret w=Data ret z=Last) call	;Payload layer can accept a data byte (for an I frame) if there is one available. if there is data available then lmp returns data byte and sets z to false
+;	lap2lmpTxValid() call				;Lap layer is indicating that all data passed since last TxStart message was acknowledged
+;	lap2lmpTxError() call				;Lap layer is indicating that all data passed since last TxStart message will need to be sent again
+;
+;Application Events
+;
+;	app2lapDiscoveryRequest(ret z=Busy)		;Application wishes to initiate the XID discovery process
+;	app2lapTxUIStart(ret z=Busy)			;Application wishes to send a UI command frame
+;
+;********************************************************************************
+			ENDM
+
+
+LapDataSeg		MACRO
+;********************************************************************************
+;  LAP LAYER
+;********************************************************************************
+
+		org	$70
+
+lapBank		= 	$70				;8 bytes used
+
+lapState	ds	1				;Current lap state
+lapRxFrame	ds	1
+lapRxData	ds	1
+lapTxXIDSlot	ds	1
+
+lapStatus	ds	1				;Status bits
+lapRemoteBusy	=	lapStatus.0			;Remote busy flag
+lapXIDDataFlag	=	lapStatus.1			;Indication that host has been informed that XID data will follow
+lapRxUIDataFlag	=	lapStatus.2			;Indication that app layer has been informed that UI data will follow
+lapTxUIDataFlag	=	lapStatus.3			;Indication that app layer has been informed that UI data will follow
+lapLmpRxFlag	=	lapStatus.4			;Indication that lmp layer has sent data that has not been acknowledged
+lapLmpTxFlag	=	lapStatus.5			;Indication that lmp layer has sent data that has not been acknowledged
+lapMediaIdle	=	lapStatus.6			;Indication that the media has not been used in the past 500ms (NDM state only)
+
+lapRxNs		ds	1				;%.....nnn = expected next I-frame sequence number (Ns)
+lapRxNrAck	ds	1				;%.....nnn = expected next I-response sequence number if last frame that was transmitted has been acknowledged
+lapRxNrNotAck	ds	1				;%.....nnn = expected next I-response sequence number if last frame that was transmitted has been not-acknowledged
+
+lapNDMState		= 0				;NDM state
+lapQUERYState		= 1				;QUERY state
+lapNDM2NRMState		= 2				;internal state to wait for TxComplete so new connection parameters can be applied
+lapNRMState		= 3				;NRM state
+lapSCLOSEState		= 4				;SCLOSE state
+lapSCLOSE2NDMState	= 5				;internal state to wait for TxComplete so default connection parameters can be applied
+
+lapMaxFrameSize		= 64				;Max frame size = 64 bytes
+lapMinTurnaround	= 116				;Number of additional BOFs to send @ 115200bps (116 = 10ms, 58 = 5ms)
+
+Timer140ms		= -1				;1  =  1*256*256*108*(1/50MHz) =  141.56ms
+Timer570ms		= -4				;4  =  4*256*256*108*(1/50MHz) =  566.23ms
+Timer1000ms		= -7				;7  =  7*256*256*108*(1/50MHz) =  990.90ms
+Timer3000ms		= -21				;21 = 21*256*256*108*(1/50MHz) = 2972.72ms
+							;Note - For a different clock frequency the 108 ISR constant changes => these timeout numbers remain the same
+
+;********************************************************************************
+			ENDM
+
+
+LapCodeSeg		MACRO
+;********************************************************************************
+;  LAP LAYER
+;********************************************************************************
+
+;********** a2lapReset **********
+
+a2lapReset
+	pcall	lap2plGenerateNewAddr			;Generate new device address
+	bank	lapBank
+	mov	lapState, #lapNDMState			;Enter NDM state
+	clr	lapStatus				;Init status
+	jmp	lapMediaBusy				;Reset media idle detection (lapMediaBusy will issue retp instruction)
+
+;********** a2lapTimer **********
+
+a2lapTimer
+	clrb	TimerOverflow				;Clear Timer flag
+	bank	lapBank
+	mov	w, lapState				;jump based on state
+	jmp	PC+w
+	jmp	lapNDMTimer				; 0 = lapNDMState
+	jmp	lapQUERYTimer				; 1 = lapQUERYState
+	retp						; 2 = lapNDM2NRMState
+	jmp	lapNRMTimer				; 3 = lapNRMState
+	jmp	lapSCLOSETimer				; 4 = lapSCLOSEState
+	retp						; 5 = lapSCLOSE2NDMState
+
+;********** pl2lapRxFrame **********
+
+pl2lapRxFrame
+	bank	lapBank
+	mov	lapRxFrame, w				;Store frame type
+	mov	w, lapState				;Jump based on state
+	jmp	PC+w
+	jmp	lapNDMRxFrame				; 0 = lapNDMState
+	jmp	lapQUERYRxFrame				; 1 = lapQUERYState
+	retp						; 2 = lapNDM2NRMState (RxFrame = impossable in this state)
+	jmp	lapNRMRxFrame				; 3 = lapNRMState
+	jmp	lapSCLOSERxFrame			; 4 = lapSCLOSEState
+	retp						; 5 = lapSCLOSE2NDMState (RxFrame = impossable in this state)
+
+;********** pl2lapRxValid **********
+
+pl2lapRxValid
+	bank	lapBank
+	mov	w, lapState				;Jump based on state
+	jmp	PC+w
+	jmp	lapNDMRxValid				; 0 = lapNDMState
+	jmp	lapQUERYRxValid				; 1 = lapQUERYState
+	retp						; 2 = lapNDM2NRMState (RxValid is impossable in this state)
+	jmp	lapNRMRxValid				; 3 = lapNRMState
+	jmp	lapSCLOSERxValid			; 4 = lapSCLOSEState
+	retp						; 5 = lapSCLOSE2NDMState (RxValid is impossable in this state)
+
+;********** pl2lapRxValid - NRM State **********
+
+lapNRMRxValid
+	mov	w, lapRxFrame				;Jump based on frame type
+	jmp	PC+w
+	jmp	lapNRMXCmdValid				;xFrame		=	0
+	jmp	lapNRMIValid				;iFrame		=	1
+	jmp	lapNRMRRValid				;sRRFrame	=	2
+	jmp	lapNRMRNRValid				;sRNRFrame	=	3
+	jmp	lapNRMREJValid				;sREJFrame	=	4
+	jmp	lapNRMSREJValid				;sSREJFrame	=	5
+	jmp	lapNRMXCmdValid				;uUIFrame	=	6	;UICmd or UIRsp (same command)
+	jmp	lapNRMDISCValid				;uDISCFrame	=	7	;DISCCmd or RDRsp (same command)
+	jmp	lapNRMXCmdValid				;uUARspFrame	=	8	;UARsp
+	jmp	lapNRMNRMValid				;uNRMFrame	=	9	;SNRMCmd or RNRMRsp (same command)
+	jmp	lapNRMXCmdValid				;uTESTFrame	=	10	;TESTCmd or TESTRsp (same command)
+	jmp	lapNRMXCmdValid				;uFRMRRspFrame	=	11	;FRMRRsp
+	jmp	lapNRMXCmdValid				;uDMRspFrame	=	12	;DMRsp
+	jmp	lapNRMXCmdValid				;uXIDCmdFrame	=	13	;XIDCmd
+	jmp	lapNRMXCmdValid				;uXIDRspFrame	=	14	;XIDRsp
+
+;********** pl2lapTxValid **********
+
+pl2lapTxComplete
+	bank	lapBank
+	mov	w, lapState				;Jump based on state
+	jmp	PC+w
+	jmp	lapNDMTxComplete			; 0 = lapNDMState        (not interesting in TxComplete)
+	retp						; 1 = lapQUERYState      (not interesting in TxComplete)
+	jmp	lapNDM2NRMTxComplete			; 2 = lapNDM2NRMState    (now can apply connection parameters)
+	retp						; 3 = lapNRMState        (not interesting in TxComplete)
+	retp						; 4 = lapSCLOSEState     (not interesting in TxComplete)
+	jmp	lapSCLOSE2NDMTxComplete			; 5 = lapSCLOSE2NDMState (now can apply defaultconnection parameters)
+
+;********** fl2lapMediaBusy **********
+
+fl2lapMediaBusy
+	bank	lapBank
+	cse	lapState, #lapNDMState			;NDM state ?
+	retp						;No => ignore
+	clrb	lapMediaIdle				;Clear MediaIdle flag
+	test	lapRxFrame				;Is a frame being received ?
+	sz
+	retp						;Yes => do not reset timer
+	mov	w, #Timer570ms				;No  => Reset timer to 500ms
+	jmp	lapSetTimer				;Apply timer to wait for media idle
+
+;********** DiscoveryRequest **********
+
+app2lapDiscoveryRequest
+	bank	lapBank
+	cse	lapState, #lapNDMState			;NDM state ?
+	clrb	lapMediaIdle				;No  => same as MediaIdle being false
+	stz						;Indicate busy
+	sb	lapMediaIdle				;Is the media idle ?
+	retp						;No  => return busy indication
+	bank	plBank
+	mov	plConnAddr, #$FE			;Accept broadcast replys only
+	bank	lapBank
+	clr	lapTxXIDSlot				;Start at slot # 0
+	mov	lapState, #lapQUERYState		;Enter QUERY state
+	call	:Send					;Send first frame
+	clz						;Indicate request was accepted
+	retp
+:Send	jmp	lapQUERYTimer
+
+;********** DiscoveryRequest **********
+
+app2lapTxUIStart
+	bank	lapBank
+	cse	lapState, #lapNDMState			;NDM state ?
+	clrb	lapMediaIdle				;No  => same as MediaIdle being false
+	stz						;Indicate busy
+	sb	lapMediaIdle				;Is the media idle ?
+	retp						;No  => return busy indication
+	clrb	lapMediaIdle				;Remember that another frame cannot be sent
+	setb	lapRxUIDataFlag				;Flag to pass messages to app layer
+	pcall	lap2plTxUICmd				;Request that the payload layer send a UI command frame
+	clz						;Indicate request was accepted
+	retp
+
+;********************************************************************************
+;  LAP LAYER - Internal Subroutines
+;********************************************************************************
+
+lapRandomFlags	=	Temp+0
+lapRandomMask	=	Temp+1
+
+;Slot bits: %00 =>  1 slot  => Mask = %0000 = 0 -> 0
+;           %01 =>  6 slots => Mask = %0011 = 0 -> 3 (ie can't result in 4 or 5)
+;           %10 =>  8 slots => Mask = %0111 = 0 -> 7
+;           %11 => 16 slots => Mask = %1111 = 0 -> 15
+
+lapRandomSlot						;returns Slot number to transmit in
+	bank	plBank					;Peek at frame info
+	mov	w, plXIDFlags				;get discovery flags
+	bank	lapBank
+	and	w, #%00000011				;Mask out non Slot bits
+	snz						;Slot bits = 0 ?
+	retp						;Yes => return 0
+	mov	lapRandomFlags, w			;Store into Flags register
+	mov	w, #%00000001				;If bit 1 = 0 then w = 0001
+	snb	lapRandomFlags.1
+	mov	w, #%00000111				;If bit 1 = 1 then w = 0111
+	mov	lapRandomMask, w			;Mask = 0001 or 0111
+	stc
+	snb	lapRandomFlags.0			;If bit 0 = 1 then rotate left with carry set
+	rl	lapRandomMask				;Rotate mask with carry set
+	bank	TimerBank
+	mov	w, Random				;random number (non resetable, increments every timer interrupt)
+	bank	lapBank					;Note: The code is synchronous with RTCC and so RTCC is not a random number
+	and	w, lapRandomMask			;Mask out unwanted bits
+	mov	lapTxXIDSlot, w				;Store slot number
+	retp
+
+;********** SetTimer **********
+
+lapSetTimer						;w = negative number to count up from
+	bank	TimerBank				;-1 = 141.56ms
+	clr	Timer1
+	clr	Timer2
+	mov	Timer3, w
+	clrb	TimerOverflow
+	bank	lapBank
+	retp
+
+;********** fl2lapMediaBusy **********
+
+lapMediaBusy
+	clr	lapRxFrame				;Reset frame type to none
+	mov	w, #Timer570ms				;No  => Reset timer to 500ms
+	jmp	lapSetTimer				;Apply timer to wait for media idle
+
+;********************************************************************************
+;  LAP LAYER
+;********************************************************************************
+
+;********** pl2lapRxError **********
+
+pl2lapRxError
+	bank	lapBank
+	call	lapMediaBusy				;Reset media idle detection
+	snb	laplmpRxFlag				;Has the lmp layer been receiving data ?
+	jmp	:LMP					;Yes => must inform lmp layer
+	snb	lapXIDDataFlag				;Has the host been informed to expect XID data ?
+	jmp	:XID					;Yes => inform of error
+	sb	lapRxUIDataFlag				;Is the app layer expecting data
+	retp						;No  => return
+:UI	clrb	lapRxUIDataFlag				;Yes => Inform app layer that UI frame is invalid
+	pjmp	lap2appRxUIError
+:LMP	clrb	laplmpRxFlag				;Clear flag
+	pjmp	lap2lmpRxError				;Inform lmp layer of error (lmp layer will issue ret instruction)
+:XID	clrb	lapXIDDataFlag				;Clear flag
+	debugl	ShowXIDInfo, '}'			;Inform host of error
+	retp
+
+
+;********** pl2lapRxXIDData **********
+
+pl2lapRxXIDData
+	bank	lapBank
+	sb	lapXIDDataFlag				;Is the host expecting XID Data ?
+	retp						;No  => ignore data
+	debug	ShowXIDInfo				;Yes => pass data
+	retp
+
+;********** pl2lapRxIData **********
+
+pl2lapRxIData
+	bank	lapBank
+	sb	laplmpRxFlag				;Should we pass data ?
+	retp						;No  => ignore data
+	pjmp	lap2lmpRxData				;Yes => pass data
+
+;********** pl2lapTxIData **********
+
+pl2lapTxIData
+	pjmp	lap2lmpTxData				;Get data from lmp layer
+
+;********** pl2lapRxUIData **********
+
+pl2lapRxUIData
+	bank	lapBank
+	sb	lapRxUIDataFlag				;Should we pass data ?
+	retp						;No  => ignore data
+	pjmp	lap2appRxUIData				;Yes => pass data
+
+;********** pl2lapTxUIData **********
+
+pl2lapTxUIData
+	pjmp	lap2appTxUIData				;Get data from app layer
+
+;********************************************************************************
+;  LAP LAYER - NDM Events
+;********************************************************************************
+
+lapEnterNDMState					;Reset connection parameters
+	mov	lapState, #lapNDMState			;Enter NDM state
+	call	lapMediaBusy				;Reset media idle detection
+:Tx	sb	laplmpTxFlag				;Is the lmp data waiting for comformation of data ?
+	jmp	:Rx					;No  => contiue without message to lmp layer
+	clrb	laplmpTxFlag				;Yes => inform lap layer that data was not-acknowledged and contiue
+	pcall	lap2lmpTxError
+	bank	lapBank
+:Rx	sb	lapLmpRxFlag				;Is the lmp layer expecting data ?
+	jmp	:Cont					;No  => contiue without message to lmp layer
+	clrb	lapLmpRxFlag				;Yes => must inform lmp layer that data is invalid
+	pcall	lap2lmpRxError
+:Cont	bank	plBank
+	mov	plConnAddr, #$FF			;Not connected => set ConnAddr to only accept be $FF
+	bank	flBank
+	mov	flFFCount, #10				;Default to 10 FFs @ 9600 = 10.42ms
+	bank	IsrBank
+	mov	IrdaSpeed, #Irda9600			;IrDA UART speed = 9600
+	clrb	ledCON					;Turn off Connect LED
+	debugl	ShowConnect, ']'
+	pjmp	lap2lmpDisconnectIndication		;Inform lmp layer of disconnection
+
+;********** NDM - RxFrame **********
+
+lapNDMRxFrame
+	csne	lapRxFrame, #uXIDCmdFrame		;XID Command frame ?
+	jmp	:Accept					;Yes => Accept frame (may want to code to inform host of incommming XIDCmd frame ?)
+	csne	lapRxFrame, #uNRMFrame			;SNRM Command frame ?
+	jmp	:Accept					;Yes => Accept frame
+	csne	lapRxFrame, #uUIFrame			;UI frame ?
+	jmp	:UI					;Yes => Accept frame
+	clr	lapRxFrame				;No  => Ignore frame
+	pjmp	lap2plRxIgnore				;Request that the payload layer ignores the frame
+:UI	setb	lapRxUIDataFlag				;Flag to pass data to app layer
+:Accept	mov	w, #Timer570ms				;500ms Timeout
+	jmp	lapSetTimer				;(lapSetTimer will issue retp instruction)
+
+;********** NDM - Timer **********
+
+lapNDMTimer
+	test	lapRxFrame				;Was a frame being received ?
+	jnz	pl2lapRxError				;Yes => treat as error, pl2lapRxError will reset the MediaBusy detection
+	setb	lapMediaIdle				;No  => media must be idle
+	retp
+
+;********** NDM - RxValid **********
+
+lapNDMRxValid
+	csne	lapRxFrame, #uXIDCmdFrame		;XID Command frame ?
+	jmp	:XID					;Yes => process
+	csne	lapRxFrame, #uNRMFrame			;SNRM Command frame ?
+	jmp	:SNRM					;Yes => process
+							;No  => must be UI frame
+:UI	call	lapMediaBusy				;Reset media idle detection
+	sb	lapRxUIDataFlag				;Is the app layer expecting data
+	retp						;No =>  ignore
+	clrb	lapRxUIDataFlag				;Yes => Inform app layer that UI frame is complete
+	pjmp	lap2appRxUIValid
+
+:XID	call	lapMediaBusy				;Reset media idle detection
+	bank	plBank					;Peek at frame info
+	snb	plXIDFlags.2				;Is the "Generate new device address" flag set ?
+	pcall	lap2plGenerateNewAddr			;Yes => ask payload layer to generate a new 32-bit address
+	bank	plBank					;Peek at frame info
+	test	plXIDSlot				;is the slot number = 0 ?
+	bank	lapBank
+	snz
+	call	lapRandomSlot				;Yes => generate random slot (slot returned in lapTxXIDSlot)
+	mov	w, lapTxXIDSlot				;Get the slot number to transmit in
+	bank	plBank
+	mov	w, plXIDSlot-w				;Subtract (ie compare) with current slot number
+	sz						;Are they the same ? (ie this slot to transmit in ?)
+	retp						;No  => return
+	bank	lapBank
+	mov	w, lapTxXIDSlot
+	clr	lapTxXIDSlot				;Reset slot number to indicate that a reply has been sent
+	pjmp	lap2plTxXIDRsp				;Transmit response
+
+:SNRM	mov	lapState, #lapNDM2NRMState		;Next state wil be NDM2NRM state to apply connection parameters after this reply has been sent
+	clrb	lapRemoteBusy				;Initilise RemoteBusy flag to false
+	clr	lapRxNs					;Initilise RxNs to 0
+	clr	lapRxNrAck				;Initilise RxNrAck to zero
+	clr	lapRxNrNotAck				;Initilise RxNrNotAck to zero
+	mov	w, #Timer1000ms				;1s timeout IrDA Lite p15)
+	call	lapSetTimer
+	setb	ledCON					;Turn on Connect LED
+	debugl	ShowConnect, '['
+	pcall	lap2lmpConnectIndication		;Inform lmp layer of connection
+	pjmp	lap2plSNRMAccept			;Send reply
+
+;********** NDM - TxComplete **********
+
+lapNDMTxComplete
+	call	lapMediaBusy				;Reset media idle test
+	sb	lapRxUIDataFlag				;Is the app layer expecting data
+	retp						;No =>  ignore
+	clrb	lapRxUIDataFlag				;Yes => Inform app layer that UI frame is complete
+	pjmp	lap2appTxUIComplete
+
+;********************************************************************************
+;  LAP LAYER - QUERY Events
+;********************************************************************************
+
+;********** QUERY - RxFrame **********
+
+lapQUERYRxFrame
+	cse	lapRxFrame, #uXIDRspFrame		;XID Response frame ?
+	pjmp	lap2plRxIgnore				;No  => Ignore frame
+	setb	lapXIDDataFlag				;Yes => Accept frame. Remember that currently passing data to host
+	debugl	ShowXIDInfo, '{'			;Show XID info start
+	retp
+
+;********** QUERY - RxValid **********
+
+lapQUERYRxValid
+	sb	lapXIDDataFlag				;Is the host expecting data
+	retp						;No =>  ignore
+	clrb	lapXIDDataFlag				;Yes => Inform host that XID frame is complete
+	debugl	ShowXIDInfo, '}'
+	retp
+
+;********** QUERY - Timer **********
+
+lapQUERYTimer
+	bank	TimerBank				;Set global timer
+	clr	Timer1					;80ms timeout after transmission is complete (75-85ms IrDA Lite p21)
+	mov	Timer2, #-198				;80ms timeout + 29.2 ms (28 bytes) to transmit = 109.2ms. 198 : 198*256*108*(1/50MHz) = 109.49ms
+	mov	Timer3, #-1				;negitive number
+	clrb	TimerOverflow
+	bank	lapBank
+	sb	lapXIDDataFlag				;Has the host been informed to expect XID data ?
+	jmp	:Good					;Yes => inform of error
+	clrb	lapXIDDataFlag				;Clear flag
+	debugl	ShowXIDInfo, '}'			;Inform host of error
+:Good	cse	lapTxXIDSlot, #08			;Last slot ?
+	jmp	:Send					;No  => send
+	mov	lapState, #lapNDMState			;Yes => After send will return to NDM state
+	mov	w, #$FF					;w = FF
+	mov	lapTxXIDSlot, w				;set slot to $FF to indicate complete
+	bank	plBank
+	mov	plConnAddr, w				;ConnAddr = FF => Accept broadcast commands only
+	bank	lapBank
+:Send	mov	w, lapTxXIDSlot				;Get current slot #
+	inc	lapTxXIDSlot				;Increment for nexty slot #
+	pjmp	lap2plTxXIDCmd				;Send XID command frame (payload layer will return)
+
+;********************************************************************************
+;  LAP LAYER - NRM Events
+;********************************************************************************
+
+;********** NDM2NRM - TxComplete **********
+
+lapNDM2NRMTxComplete
+	mov	lapState, #lapNRMState			;NRM state
+	bank	plBank					;Agreed BaudRate is the most significant bit that is set in plSNRMBaudRate
+	mov	w, #Irda9600				;Min = 9600
+	snb	plSNRMBaudRate.2			;19200 ?
+	mov	w, #Irda19200				;Yes => w = 19200
+	snb	plSNRMBaudRate.3			;38400 ?
+	mov	w, #Irda38400				;Yes => w = 38400
+	snb	plSNRMBaudRate.4			;57600 ?
+	mov	w, #Irda57600				;Yes => w = 57600
+	snb	plSNRMBaudRate.5			;115200 ?
+	mov	w, #Irda115200				;Yes => w = 115200
+	bank	IsrBank
+	mov	IrdaSpeed, w				;Apply baud rate
+	bank	plBank					;Set FF Count to ensure 10ms. FFCount = BaudRate / 10 * 0.01s
+	mov	w, #lapMinTurnaround / 11.6		;Min = 9600 => 10ms = 10 bytes
+	snb	plSNRMBaudRate.2			;19200 ?
+	mov	w, #lapMinTurnaround / 5.8		;Yes => 10ms = 20 bytes
+	snb	plSNRMBaudRate.3			;38400 ?
+	mov	w, #lapMinTurnaround / 2.9		;Yes => 10ms = 39 bytes
+	snb	plSNRMBaudRate.4			;57600 ?
+	mov	w, #lapMinTurnaround / 2		;Yes => 10ms = 58 bytes
+	snb	plSNRMBaudRate.5			;115200 ?
+	mov	w, #lapMinTurnaround			;Yes => 10ms = 116 bytes
+	bank	flBank
+	mov	flFFCount, w				;Apply FFCount
+	retp
+
+;********** NRM - SendResponse **********
+
+lapSendNRMResponse
+	snb	lapRemoteBusy				;Is the remote busy flag set ?
+	jmp	lapSendSResponse			;Yes => send S-Response
+	pcall	lap2lmpTxFrame				;Returns z = false if data to be sent
+	bank	lapBank
+	snz						;Is there data to be sent ?
+	jmp	lapSendSResponse			;No  => send S-Response
+:Data	setb	laplmpTxFlag				;Yes => Rember that lmp layer is passing data
+	mov	w, <<lapRxNs				;Send Nr = RxNs. w = RxNs %....nnn.
+	and	w, #%00001110				;mask out non Ns bits
+	mov	Temp, w					;Store in Temp
+	swap	Temp					;Temp = RxNs %nnn.....
+	setb	Temp.4					;Set bit 4 = final flag
+	mov	w, <<lapRxNrAck				;Send Ns = RxNrAck. w = RxNrAck %....nnn.
+	and	w, #%00001110				;mask out non Ns bits
+	add	w, Temp					;Add Nr bits
+	inc	lapRxNrAck				;add 1 to NrAck - the expect acknowledge
+	pjmp	lap2plTxIRsp				;Transmit I frame
+	
+lapSendSResponse
+	mov	w, <<lapRxNs				;Send Nr = RxNs. w = RxNs %....nnn.
+	and	w, #%00001110				;mask out non Ns bits
+	mov	Temp, w					;Store in Temp
+	swap	Temp					;Temp = RxNs %nnn.....
+	mov	w, #sRR					;frame will be of type RR
+	add	w, Temp					;Set Nr of frame to RxNs = expected next I frame
+	pjmp	lap2plTxSimpleRsp			;Send simple response frame
+
+;********** NRM - SendRD **********
+
+lapNRMSendRD
+	mov	w, #Timer3000ms
+	call	lapSetTimer				;Reset timer for SCLOSE state
+	sb	lapLmpRxFlag				;Is the lmp layer expecting data ? (ie error caused by timeout)
+	jmp	:Cont					;No  => contiue
+	clrb	lapLmpRxFlag				;Yes => must inform lmp layer that data is invalid
+	pcall	lap2lmpRxError				;
+	bank	lapBank
+:Cont	mov	lapState, #lapSCLOSEState		;change to SCLOSE state
+	mov	w, #uRDRsp				;frame will be of type RD
+	pjmp	lap2plTxSimpleRsp			;Send simple response frame
+
+;********** NRM - RxFrame **********
+
+lapNRMRxFrame
+	csne	lapRxFrame, #iFrame			;I Data frame ?
+	setb	lapLmpRxFlag				;Yes => Flag to pass data to lmp layer
+	retp						;Accept all frames
+
+;********** NRM - SValid or IValid **********
+
+lapNRMSIValid
+	mov	w, #Timer3000ms
+	call	lapSetTimer				;Reset timer on any S-Command
+	bank	plBank
+	mov	w, >>plCommand				;w = %.nnn.... get the received command byte (shifted)
+	mov	Temp, w					;Temp = received Nr bits (%.nnn....)
+	swap	Temp					;Temp = received Nr bits (%.....nnn)
+	bank	lapBank
+	mov	w, lapRxNrAck				;w = expected Nr if Ack
+	xor	w, Temp					;compare received Nr with NrAck
+	and	w, #%00000111				;only examine lowest bits
+	snz						;Does Nr = NrAck (ie is this a valid ack) ?
+	jmp	:Ack					;Yes => valid Ack
+	mov	w, lapRxNrNotAck			;w = expected Nr if Not-Ack
+	xor	w, Temp					;compare received Nr with NrNotAck
+	and	w, #%00000111				;only examine lostest bits
+	sz						;Does Nr = NrNotAck (ie is this a valid not-ack) ?
+	jmp	lapNRMSendRD				;No  => Fatal Error - invalid Nr => must disconnect (Valid/Error message for LMP layer willbe sent prior to the DisconnectIndication)
+:NotAck	dec	lapRxNrAck				;return NrAck back to what it was before transmission of the last I-Frame
+	sb	laplmpTxFlag				;Is the lmp data waiting for comformation of data ?
+	jmp	:Cont					;No  => contiue without message to lmp layer
+	clrb	laplmpTxFlag				;Yes => inform lap layer that data was not-acknowledged and contiue
+	pcall	lap2lmpTxError
+	jmp	:Cont
+:Ack	mov	lapRxNrNotAck, lapRxNrAck		;Set NrNotAck to match NrAck
+	sb	laplmpTxFlag				;Is the lmp data waiting for comformation of data ?
+	jmp	:Cont					;No  => contiue without message to lmp layer
+	clrb	laplmpTxFlag				;Yes => inform lap layer that data was acknowledged and contiue
+	pcall	lap2lmpTxValid
+:Cont	bank	lapBank
+	cse	lapRxFrame, #iFrame			;Is this an i frame ?
+	jmp	lapSendNRMResponse			;No  => S frame => Send-NRM-Response
+	bank	plBank					;Yes => must test Ns
+	mov	w, >>plCommand				;get the received command byte (shifted right 1 bit)
+	bank	lapBank
+	xor	w, lapRxNs				;Compare with expected Ns
+	and	w, #%00000111				;Only test lowest 3 bits
+	jnz	:Ignore					;If Ns <> expected then ignore
+:Valid	inc	lapRxNs					;increment RxNs
+	sb	lapLmpRxFlag				;Is the lmp layer expecting data ?
+	jmp	lapSendNRMResponse			;No  => send NRM-response
+	clrb	lapLmpRxFlag				;Yes => must inform lmp layer that data is complete
+	pcall	lap2lmpRxValid				;Indicate data complete and valid
+	bank	lapBank
+	jmp	lapSendNRMResponse			;send NRM-response
+:Ignore	sb	lapLmpRxFlag				;Is the lmp layer expecting data ?
+	jmp	lapSendSResponse			;No  => send S-response
+	clrb	lapLmpRxFlag				;Yes => must inform lmp layer that data is invalid
+	pcall	lap2lmpRxError				;
+	bank	lapBank
+	jmp	lapSendSResponse			;send S-response
+
+lapNRMIValid	=	lapNRMSIValid			;A I frame has been received
+
+lapNRMRRValid						;A RR frame has been received
+	clrb	lapRemoteBusy				;Remember that remote is not busy and send reply
+	jmp	lapNRMSIValid
+
+lapNRMRNRValid						;A RNR frame has been received
+	setb	lapRemoteBusy				;Remember that remote is busy and send reply
+	jmp	lapNRMSIValid
+
+lapNRMREJValid	=	lapNRMSIValid		;A REJ frame has been received
+lapNRMSREJValid	=	lapNRMSIValid		;A SREJ frame has been received
+
+;********** NRM - SNRMCmdValid **********
+
+lapNRMNRMValid	=	lapNRMSendRD
+
+;********** NRM - XCmdValid **********
+
+lapNRMXCmdValid	=	lapSendSResponse
+
+;********** NRM - DISCCmdValid **********
+
+lapNRMDISCValid						;Disconnect command: ack and apply default parameters.
+	mov	lapState, #lapSCLOSE2NDMState		;Next state = transition to apply origional connection parameters once this frame has been sent
+	mov	w, #uUARsp				;Send UA frame to acknowledge disconnect
+	pjmp	lap2plTxSimpleRsp			;Send simple response frame
+
+;********** NRM - Timer **********
+
+lapNRMTimer	=	lapEnterNDMState		;Timeout => return to NDM state.
+
+;********** lmp2lapDisconnectRequestr **********
+
+lmp2lapDisconnectRequest
+	bank	lapBank
+	cse	lapState, #lapNRMState			;Currenly in NRM state ?
+	retp						;No  => ignore request
+	mov	lapState, #lapSCLOSEState		;Yes => change to SCLOSE state
+	retp
+
+;********************************************************************************
+;  LAP LAYER - NRM Events
+;********************************************************************************
+
+;********** SCLOSE - RxFrame **********
+
+lapSCLOSERxFrame
+	retp						;Accept all frames
+
+;********** SCLOSE - RxValid **********
+
+lapSCLOSERxValid
+	csne	lapRxFrame, #uDISCFrame			;DISC Command frame ?
+	jmp	lapNRMDISCValid				;Yes => Send ack, apply default parameters and enter NDM state
+	mov	w, #Timer3000ms
+	call	lapSetTimer				;No, however still must be a command frame (due to ConnAddr) => send RD frame
+	mov	w, #uRDRsp				;Send RD Response frame to request disconnect
+	pjmp	lap2plTxSimpleRsp			;Send simple response frame
+
+;********** SCLOSE - Timer **********
+
+lapSCLOSETimer		=	lapEnterNDMState
+
+;********** SCLOSE2NDM - TxComplete **********
+
+lapSCLOSE2NDMTxComplete	=	lapEnterNDMState
+
+;********************************************************************************
+		ENDM
+

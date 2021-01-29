@@ -1,0 +1,114 @@
+;*****************************************************************************************
+; Copyright © [4/01/2000] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+; 
+; Filename:
+;		vpg_UART_1_04.src
+;
+; Authors:
+;		Chris Fogelklou
+;		Applications Engineer	
+;		Scenix Semiconductor, Inc.
+;		
+; Revision:
+;		1.04
+;
+; Target Part(s):
+;		SX18/20/28AC, Datecode AB9918AA and up
+; 		SX48/52BD, Datecode AB9946AA and up
+;
+; Default Oscillator Frequency:
+;		25MHz
+;
+; Assemblers:
+;		SXKey28L Version 1.09 for SX18/20/28AC
+;		SXKey52 Version 1.19 for SX48/52BD
+;		SASM Version 1.44.6
+;	
+; Date Written:
+;		May 01, 2000
+;
+; Program Description:
+;		Virtual Peripheral Guidelines Document Demonstration Application
+;		This is runnable source-code when the word DEMO has been defined
+;		somewhere in the code.
+;		This example source code is ready to run at an oscillator
+;		frequency of 25MHz.  Included in the source code is an Asynchrounous
+;		Serial Transmitter Virtual peripipheral and an Asynchrounous Serial
+;		Receiver Virtual Peripheral.  When run at an oscillator frequency
+;		of 25MHz, the data rate of the transmitter and receiver is 9600bps.
+;
+; Included Virtual Peripherals:
+;-------------------------------------------------------------------------------------
+; Asynchrounous Serial Transmitter VP:
+;		Transmits 8-bit, serial data at a bit rate determined by the sampling
+;		rate of this Virtual Peripheral and defined constants in the source
+;		code.
+;
+;	Constant Declarations:
+;		RS232TX_FS
+;			This value represents the sampling frequency of this Virtual
+;			Peripheral, in Hertz.  The sampling frequency is the rate at
+;			which the virtual peripheral is executed by the Interrupt 
+;			Service Routine.
+;
+;		RS232TX_BAUD
+;			This value represents the desired baud rate of this Virtual
+;			Peripheral, in Hertz.  To obtain an accurate baud rate, 
+;			ensure that (RS232TX_FS/RS232TX_BAUD) results in an integer
+;			value from 0 to 255.
+;
+;		RS232TX_DIVIDE
+;			RS232_DIVIDE = RS232TX_FS/RS232TX_BAUD
+;			This value is calculated at assemble time by the assembler.
+;			It can only result in an integer value from 0 to 255.  
+;			To determine the actual, in-circuit baud rate:
+;			BaudRate = (SampleRate/(int(RS232TX_DIVIDE)));
+;
+; API:
+;	rs232TxSendByte 
+;		Description:
+;			Sends the byte in w via the Asynchrounous Serial Transmit VP.
+;			Will block if the transmit VP is still busy.
+;			Load W with the byte to send before calling rs232TxSendByte
+;
+;		Global Ram Destroyed:
+;			none
+;
+;		Inputs:
+;			w - The byte to be sent
+;
+;		Outputs:
+;			Initializes the Asynchrounous Serial Transmit VP and sends the
+;			byte out serially.
+;	rs232SendString
+;
+;		Description:
+;			Sends the null-terminated string at location "w" serially.
+;
+;		Inputs:
+;			w - The location of the string to be sent.  The string must
+;			be located
+;
+;********** Finish off comments here.
+;
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, 
+; SX48BD, or SX52BD.
+;*****************************************************************************************
+;SX18_20
+;SX28
+SX48_52
+
+

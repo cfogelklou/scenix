@@ -1,0 +1,1859 @@
+;******************************************************************************
+; Copyright © [05/15/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;
+; Filename:	v_23_originate_1_37.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.37
+;
+; Part:		SX28AC datecode 9929AA/ SX52BD datecode AB9919AA
+; Freq:		50Mhz
+;
+; Compiled Using: SX-Key v.1.07 and SASM V. 1.43
+;
+; Date:		May 23, 1999.
+;
+; Revised	November 30, 1999
+;
+; Program Description:
+;		This program performs V.23 origination on the Scenix/IDC 
+;		modem boards V.1.2.  These specifications are followed:
+;
+;	User Interface
+;		- Software UART will provide the modem’s interface.
+;			- 1200 baud
+;			- No Parity
+;			- 8 Data Bits
+;			- 1 Stop Bit
+;			- Hardware Flow Control (CTS, RTS)
+;			- Compact AT command set
+;			- 64-byte command buffer
+;			- Dial: “ATDTxxxxxxxxx…”
+;			- Switch from data mode to command mode: “+++”
+;				To escape, wait at least 3 seconds from the last transmitted 
+;				character, and type +++ with less than 1 second between each 
+;				character.  The modem will return to command mode if another
+;				character is not received in 3 seconds.
+;			- Switch from command mode to data mode: “ATO”
+;			- Hang up: “ATH”
+;			- Initialize: “ATZ”
+;			- Automatic Hybrid Adjustment: “ATY”
+;
+;	Signal Generation/Detection Software
+;		- DTMF Generation for Dialing
+;			- Tones generated: 697Hz, 770Hz, 852Hz, 941Hz, 1209Hz, 1336Hz, 1477Hz,1633Hz
+;			- On time = 100ms
+;			- Off time = 100ms
+;			- Off-hook delay time before dialing = 4 s
+;			- D/A conversion provided by filtered PDM output
+;			- Data transmission and modulation
+;		- FSK transmission data rate at 75bps
+;			- Hardware flow control, 16-byte buffer, and 75bps asynchronous transmitter for
+;			  data rate conversion from 1200bps to 75bps
+;			- Logic ‘1’ (mark) modulated by 390 Hz
+;			- Logic ‘0’ (space) modulated by 450 Hz
+;			- Transmission power = -15dB
+;			- D/A conversion provided by filtered PDM output
+;			- Data reception and demodulation
+;		- FSK reception data rate at 1200bps
+;			- Logic ‘1’ (mark) demodulated from 1300Hz carrier
+;			- Logic ‘0’ (space) demodulated from 2100Hz carrier
+;			- Carrier detection
+;			- Timed-Zero-Cross algorithm
+;		- D/A conversion
+;			- Pulse Position Modulation with maximum output frequency of 307kHz
+;
+;	Hardware Specifications
+;		- Filtering
+;			- Low pass filter on PDM output (fc = 1633Hz)
+;			- High pass filter on FSK input (fc = 1300Hz)
+;		- Hybrid (removes tx signal from rx signal)
+;			- Four settings provided for automatic hybrid adjustment for various line
+;			  impedance’s
+;			- Hybrid adjusted by outputting signal onto line and measuring fed-back signal
+;			  with a low-resolution sigma-delta A/D converter
+;			- FSK input sensitivity = -30dB
+;			- Auto-Hybrid removed in V.1.37
+;		- UART
+;			- RS-232 interface provided through MAX232 or similar IC
+;			- Interface provided through RXD, TXD, RTS, and CTS lines
+;
+;	Testing Specifications
+;			- Initial tests using function generator and off-the-shelf V.23 modems
+;			- Second round of testing performed with IDC’s modem test equipment
+;			- Tests performed:
+;			- Input Sensitivity
+;			- DTMF output level
+;			- FSK output level
+;			- Error rate
+;			- FCC part 68 and FCC part 15 qualified
+;			- CTR-21 ready
+;			- All test results will be documented
+;
+; Program Instructions;
+;		To use this program, the modem board must be connected to a serial port at
+;		these settings:
+;			1200 bps
+;			No parity
+;			8 Data Bits
+;			1 stop bit
+;			Hardware flow control ON!!! (CTS/RTS)
+;
+;		These AT commands can be used:
+;
+;			ATDT - Used to dial into a remote modem
+;			ATH - Used to hang up a call
+;			ATZ - Used to initialize the modem settings
+;			ATO - Switches back to data mode from command mode
+;			+++ - Switches from data mode to command mode.
+;			?   - Re-prints the help screen to the terminal.
+;
+; Revision History:
+;		1.10 Took semi-working V.23 code and cleaned it up.  Kept it working, but made
+;		few improvements to the operation.
+;		1.15 Finally got FSK receive to work error free!!! Whooopeee!!!
+;		1.17 Added documentation.
+;		1.20 Added carrier detection to the software
+;		1.30 Added automatic hybrid adjustment to the software.
+;		1.32 Automatic hybrid adjustment tweaked until working.  Component values for A/D:
+;		     C = 470pF, R1 = 22k, R2 = 10k
+;		1.35 Added guard times around the “+++” coming in.  
+;		1.37 Removed Auto-Hybrid Adjust.  Made sure assembly worked in SASM.
+;		     Removed CARRYX directive and modified source code accordingly.
+;
+;
+;	RESOURCES:
+;       Program memory: TBD
+;       Data memory:	TBD
+;       I/O Count:	TBD
+;
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+SX28
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+SX_Key
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oscxt4,turbo,stackx_optionx
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs1,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs1,turbo,stackx,optionx
+  ENDIF
+ENDIF
+		ID	'v23org13'			; Version = 1.1
+
+		reset	reset_entry			; JUMP to reset_entry label on reset
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+_bank	macro	1
+	bank	\1
+
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+	    ELSE
+		clrb	fsr.7
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+	IFDEF SX48_52
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+	ELSE
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+	ENDIF
+	endm
+
+	;*****************************************************************************************
+	; Error generating macros
+	;*****************************************************************************************
+
+tableStart	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+tableEnd	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+	ERROR ' This program has not been ported to SX48/52'
+					; Let the programmer know that this program
+					; will only work on the SX28.
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+		org     global_org
+
+flags	ds	1
+	dtmf_gen_en	equ	flags.0	; Signifies whether or not DTMF output is enabled
+	sine_gen_en	equ	flags.1	; Enables the sine generator(s) for DTMF generation and
+					; FSK generation
+	timer_flag	equ	flags.2	; Set every time the timers roll over.
+	fsk_tx_en	equ	flags.3	; enables the fsk transmission portion of the ISR
+	fsk_rx_en	equ	flags.4	; enables the fsk reception portion of the ISR
+	rx_flag		equ	flags.5	; this flag is set when a byte is received via the UART
+	fsk_rx_bit	equ	flags.6	; this bit indicates the current state of the FSK being
+	carrier_detected equ	flags.7	; indicates the presence of a carrier
+						;  received.
+flags2		ds	1	
+	swCarryFlag	equ	flags2.0
+temp		ds	1		; Temporary register
+temp2		ds	1		; Temporary register
+task_switcher	ds	1		; Used in the ISR to switch between tasks.
+push_index	ds	1		; Used by the 64-byte buffer to store bytes.	
+pop_index	ds	1		; Used by the 64-byte buffer to retrieve bytes.
+command_index	ds	1		; Used by the string parser to remember the current
+						; command being checked.
+	
+;******************************************************************************
+; Bank 0 Variables
+;******************************************************************************
+		org     bank0_org
+
+sine_gen_bank		=	$
+freq_acc_low		ds	1	; 16-bit accumulator which decides when to increment the sine wave
+freq_acc_high		ds	1	; 
+freq_count_low		ds	1	; 16-bit counter which decides which frequency for the sine wave
+freq_count_high		ds	1	; freq_count = Frequency * 6.83671552
+sine_index		ds	1	; Index into the sine table for sine wave 1
+sine_index2		ds	1	; Index into the sine table for sine wave 2
+freq_count_low2		ds	1	; 16-bit counter which sets the sine wave frequency
+freq_count_high2	ds	1	; freq_count = Frequency * 6.83671552
+freq_acc_high2		ds	1	; 
+freq_acc_low2		ds	1	; 16-bit accumulator which decides when to increment the sine wave
+curr_sine		ds	1	; The current value of the sine wave
+curr_sine2		ds	1	; The current value of sine wave 2
+sine2_temp		ds	1	; This register is used to do a temporary shift/add register
+PDM_bank		=	$
+
+PDM0_acc		ds	1		; PDM accumulator
+PDM0_out		ds	1		; current PDM output (D/A)
+
+;******************************************************************************
+; Bank 1 Variables
+;******************************************************************************
+		org     bank1_org
+timers			=	$
+timer_l		ds	1		; The low byte of the 24-bit timer
+timer_h		ds	1		; the middle byte of the 24-bit timer
+timer_hh	ds	1		; the high byte of the 24-bit timer
+
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+rx_count2	ds      1                       ;number of bits received
+rx_divide2	ds      1                       ;receive timing counter
+rx_byte2	ds      1                       ;buffer for incoming byte
+string		ds	1			;the address of the string to be sent
+byte		ds	1			;semi-temporary serial register
+plus_count	ds	1			;stores the number of consecutive '+''s received during
+						; FSK i/o mode.
+
+;******************************************************************************
+;	Bank 2 Variables
+;******************************************************************************
+		org     bank2_org
+fsk_transmit_bank	=	$
+fsk_receive_bank	=	$
+fsk_serial_bank		=	$
+	
+fsk_tx_high		ds      1                       ;hi byte to transmit
+fsk_tx_low		ds      1                       ;low byte to transmit
+fsk_tx_count		ds      1                       ;number of bits sent
+fsk_tx_divide		ds      1                       ;xmit timing (/16) counter
+fsk_tx_divide_2		ds	1
+
+fsk_trans_count		ds	1		; This register counts the number of counts 
+						; between transitions at the pin
+fsk_last_trans		ds	1		
+fsk_rb_past_state 	ds	1		; This register keeps track of the previous 
+						; state of port RB, to watch for transitions
+fsk_temp_trans		ds	1		; Temporarily stores the transition count after
+						; a transition has occurred, until it can be processed.
+fsk_flags		ds	1
+	fsk_answering		equ	fsk_flags.0
+	fsk_tx_bit		equ	fsk_flags.1
+	fsk_processing_required_1 equ	fsk_flags.2
+
+;******************************************************************************
+;	Bank 3 Variables
+;******************************************************************************
+		org     bank3_org
+carrier_detect_bank	=	$
+cd_trans_count		ds	1
+cd_trans_avg_l		ds	1
+cd_trans_avg_h		ds	1
+cd_avg_count		ds	1
+cd_rb_past_state	ds	1
+
+;*************************************************************
+; Bank 4, 5, 6, 7 (for 64-byte buffer, but can be reused.)
+;*************************************************************
+		org     bank4_org
+buffer		=	$
+		org     bank5_org
+buffer2		=	$
+		org     bank6_org
+buffer3		=	$
+		org     bank7_org
+buffer4		=	$
+
+;*************************************************************
+; Equates for the FSK receive part of the modem
+;*************************************************************
+threshold	=	180	; How many counts to look for for a transition from high frequency to low frequency
+fsk_hysterises	=	6	; The number of counts over/under the threshold to allow an actual transition
+				; from high to low on RX-bit
+;*************************************************************
+;**************************************************************************
+; Baud rate defines
+;**************************************************************************
+	; *** 150 baud 
+;	baud_bit	=       7                       ;for 2400 baud
+;	start_delay	=       128+64+1                ; "    "    "
+;	int_period	=       163                     ; "    "    "
+	; *** 600 baud 
+;	baud_bit	=	5
+;	start_delay	=	32+16+1
+;	int_period	=	163
+	; *** 1200 baud 
+baud_bit	=	4
+start_delay	=	16+8+1
+int_period	=	163
+
+;**************************************************************************
+; Equates for common data comm frequencies
+;**************************************************************************
+f697_h		equ	$012	; DTMF Frequency
+f697_l		equ	$09d
+
+f770_h		equ	$014	; DTMF Frequency
+f770_l		equ	$090
+
+f852_h		equ	$016	; DTMF Frequency
+f852_l		equ	$0c0
+
+f941_h		equ	$019	; DTMF Frequency
+f941_l		equ	$021
+
+f1209_h		equ	$020	; DTMF Frequency
+f1209_l		equ	$049
+
+f1336_h		equ	$023	; DTMF Frequency
+f1336_l		equ	$0ad
+
+f1477_h		equ	$027	; DTMF Frequency
+f1477_l		equ	$071
+
+f1633_h		equ	$02b	; DTMF Frequency
+f1633_l		equ	$09c
+;******************************************************************************
+; Equates for FSK generation
+;******************************************************************************
+f390_h		equ	$00a	; V.23 backchannel logic '1' (mark)
+f390_l		equ	$06a
+
+f450_h		equ	$00c	; V.23 backchannel logic '0' (space)
+f450_l		equ	$004
+
+f1300_h		equ	$022	; V.23 forward channel logic '1' (mark)
+f1300_l		equ	$0b7
+
+f2100_h		equ	$038	; V.23 forward channel logic '0' (space)
+f2100_l		equ	$015
+
+f2225_h		equ	$03b	; Bell 103 forward channel logic '1' (mark)
+f2225_l		equ	$06b
+
+f2025_h		equ	$036	; Bell 103 forward channel logic '0' (space)
+f2025_l		equ	$014
+
+f1070_h		equ	$01c	; Bell 103 backward channel logic '1' (mark)
+f1070_l		equ	$093
+
+f1270_h		equ	$021	; Bell 103 backward channel logic '0' (space)
+f1270_l		equ	$0ea
+
+	;*********************************************************************************
+	; Pin Definitions:  These are the pins on the Scenix Modem board.  Not all are
+	; 			necessary.  Check the documentation at the top of this 
+	;			program.
+	;*********************************************************************************
+PDM_pin		equ	ra.0	; D/A output pin
+rx_pin		equ	ra.1	; RS-232 reception pin
+tx_pin		equ	ra.2	; RS-232 transmission pin
+nothing		equ	ra.3	; N/C
+RA_latch	equ	%11111111		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11111010		;SX18/20/28/48/52 port A DDIR value
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%11111111		;SX18/20/28/48/52 port A PLP value
+
+led_pin		equ	rb.0	; LED pin
+rxa_pin		equ	rb.1	; FSK receive pin
+cntrl_1		equ	rb.2	; drive cntrl_1 low to disable the output of the LPF
+ring		equ	rb.3	; ring detection pin
+hook		equ	rb.4	; drive hook low to go off-hook
+cntrl_3		equ	rb.5	; drive cntrl_3 low to disable the output of the HPF
+rts		equ	rb.6	; indicates to the SX that the PC wants to transmit data
+cts		equ	rb.7	; indicates to the PC that the SX is ready to receive data
+RB_latch	equ	%11011011		;SX18/20/28/48/52 port B latch init
+
+RB_DDIR		equ	%01101010		;SX18/20/28/48/52 port B DDIR value: HPF
+
+RB_ST		equ	%11111111		;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111		;SX18/20/28/48/52 port B PLP value
+
+fskRxPort	equ	rb
+fskRxMask	equ	%00000010
+
+rc_450_mask	equ	%11100101			; Hybrid set-up for 450 ohms
+rc_600_mask	equ	%11010101			; Hybrid set-up for 600 ohms
+rc_750_mask	equ	%10110101			; Hybrid set-up for 750 ohms
+rc_900_mask	equ	%01110101			; Hybrid set-up for 900 ohms
+
+dtmf_in_pin	equ	rc.0	; DTMF input pin
+dtmf_fdbk_pin	equ	rc.1	; Negative feedback output for DTMF input
+AtoD_in_pin	equ	rc.2	; A/D input pin
+AtoD_fdbk_pin	equ	rc.3	; Negative feedback for A/D input
+imp_450_pin	equ	rc.4	; Set to an output to set hybrid for 450ohm line impedance.  Tristate otherwise.
+imp_600_pin	equ	rc.5	; Set to an output to set hybrid for 600ohm line impedance.  Tristate otherwise.
+imp_750_pin	equ	rc.6	; Set to an output to set hybrid for 750ohm line impedance.  Tristate otherwise.
+imp_900_pin	equ	rc.7	; Set to an output to set hybrid for 900ohm line impedance.  Tristate otherwise.
+RC_latch	equ	%00001111		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	rc_600_mask		;SX18/20/28/48/52 port C DDIR value
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+	;*********************************************************************************
+	; SX18AC/20AC/28AC Mode addresses
+	; *On SX18/20/28, all registers addressed via mode are write only, with the exception of
+	; CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_W		equ	$0A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$0B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$0C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$0D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$0E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$0F		;Write Port Direction
+;************************ Beginning of program space ***************************
+		org	$0			
+;******************************************************************************
+; Interrupt
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+PDM_output
+		bank	PDM_bank		; Update the PDM pin
+		add	PDM0_acc,PDM0_out
+		snc
+		setb	PDM_pin
+		sc
+		clrb	PDM_pin
+;**************************************************************************
+		jmp	@ISR	; The ISR is in the second page, so go there.
+;******************************************************************************
+reset_entry
+; Program Starts Here on Power Up
+;******************************************************************************
+
+	;**********************************************************************
+	; First, call init to initialize the program
+	;**********************************************************************
+		call	@init
+
+		mov	!option,#%00011111	; enable wreg and rtcc interrupt
+		setb	tx_pin			; set the RS-232 tx_pin
+		setb	CTS			; Don't allow PC to transmit
+		mov	w,#25			; delay 250 milliseconds
+		call	@delay_10n_ms
+
+	;**********************************************************************
+	; Send "hello" string
+	;**********************************************************************
+		mov	w,#_hello		; say 'hello'
+		call	@send_string
+		mov	w,#_help
+		call	@send_string
+
+	;**********************************************************************
+	; Send prompt
+	;**********************************************************************
+main_2
+_send_prompt	mov	w,#_prompt		; send prompt
+		call	@send_string
+		clrb	CTS			; Allow PC to transmit
+		clr	push_index		; Clear the buffer_push pointer
+		clr	pop_index		; Clear the buffer_pop pointer
+
+	;**********************************************************************
+	; Fill the command buffer with input characters.  Backspace will delete
+	; the last value entered.  
+	;**********************************************************************
+_cmd_loop
+		jnb	rx_flag,$			; Wait until we receive a byte via. RS-232
+		clrb	rx_flag				; clear the flag
+		bank	serial			
+		mov	byte,rx_byte			; Move the received byte to 'byte' and
+		call	@uppercase			; convert it to uppercase
+		mov	w,#$20				; compare the byte to ' '
+		xor	w,byte
+		jz	_cmd_loop			; If byte == space, ignore it.
+		mov	w,#$0a				; compare the byte to LF
+		xor	w,byte		
+		jz	_cmd_loop			; If byte == line feed, ignore it.
+		mov	w,#$0d				; compare the byte to CR
+		xor	w,byte
+		jz	:enter				; if byte == CR, parse the string.
+		mov	w,byte				; if it does not resemble the above characters, echo it.
+		call	@send_byte			; send via. RS-232
+		mov	w,#$08				; compare the byte to a backspace.
+		xor	w,byte				
+		jz	:backspace			; if it equals a backspace, delete one character in the buffer.
+		call	@buffer_push			; otherwise, store it
+		jmp	_cmd_loop			; and come back for more.
+:backspace
+		call	@buffer_backspace		
+		jmp	_cmd_loop
+
+:enter							; If the user presses enter, then parse the string.
+
+
+	;**************************************************************************
+	; String parser (Checks to see if buffer = any commands)
+	; -Checks contents of ascii buffer against any commands stored in ROM
+	; -If a command = the contents of the ascii buffer, a routine will be called
+	; -Each routine MUST perform a retw 0 on exit, or parse_string will not 
+	;  know that a routine has run and it should exit back to command mode.
+	; -Exits back to command mode when it detects a zero after the table look-up.
+	; -Outputs 'OK' if no commands are matched.
+	;**************************************************************************
+parse_string
+		clr	pop_index			; Clear the index into the ascii buffer
+		clr	command_index			; And the index into the commands
+		
+:loop		call	@buffer_get			; Get a vale from the buffer at ascii_index
+		call	command_table			; Get a character from one of the commands
+		test	wreg				; If the return value is 0, then this matched
+		jz	:nothing			; the command and ran a routine.  Exit.
+		bank	serial				
+		xor	w,byte				; compare the command's character with the 
+		jnz	:not_equal			; buffer's character.
+		call	@inc_pop_index			; Increment the index into the buffer.
+		jmp	:loop
+:not_equal
+		inc	command_index			; If the buffer did not equal the command,
+		clr	pop_index			; start from the beginning of a new command 
+		
+		cjne	command_index,#5,:loop		; compare command_index with 5  (This number = # of commands)
+:nothing	clrb	fsk_rx_en
+		setb	tx_pin
+		mov	w,#20
+		call	@delay_10n_ms
+		mov	w,#_CR
+		call	@send_string
+		mov	w,#_OK				; If we have checked all 5 commands, then this
+		call	@send_string			; did not equal any so send an 'OK' message.
+:done
+		bank	buffer
+		clr	pop_index
+		clr	push_index
+		clr	buffer
+		jmp	_send_prompt
+
+;**************************************************************************
+command_table
+		mov	w,command_index
+		add	pc,w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		jmp	command_1
+		jmp	command_2
+		jmp	command_3
+		jmp	command_4
+		jmp	command_5
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+command_1					; Dial command
+		mov	w,pop_index
+		add	PC,w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	'A'
+		retw	'T'
+		retw	'D'
+		retw	'T'
+		jmp	DIAL_MODE
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+command_2					; Hang up command
+		mov	w,pop_index
+		add	PC,w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	'A'
+		retw	'T'
+		retw	'H'
+		jmp	HANG_UP
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+
+;**************************************************************************
+command_3					; Initialize
+		mov	w,pop_index
+		add	PC,w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	'A'
+		retw	'T'
+		retw	'Z'
+		jmp	INITIALIZE
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+command_4					; Data mode
+		mov	w,pop_index
+		add	PC,w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	'A'
+		retw	'T'
+		retw	'O'
+		jmp	FSK_IO
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+command_5					; Hybrid Set-up
+		mov	w,pop_index
+		add	PC,w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	'?'
+		jmp	HELP
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+; END of String parser (Checks to see if buffer = any commands)
+;**************************************************************************
+	;**********************************************************************
+	; Hang Up
+	;**********************************************************************
+HANG_UP
+		call	@disable_o
+		clrb	fsk_rx_en	; Disable fsk detection
+		mov	w,#50
+		call	@delay_100n_ms	; Pause for 5 seconds.
+		setb	hook		; hang-up
+		retw	0
+	;**********************************************************************
+	; Initialize
+	;**********************************************************************
+INITIALIZE
+		mov	w,#10
+		call	@delay_100n_ms	; Pause for 1 second
+		call	@init
+		clr	flags
+		retw	0
+
+
+	;**********************************************************************
+	; Send Help string
+	;**********************************************************************
+HELP		mov	w,#_HELP
+		call	@send_string
+		retw	0
+				
+	;**************************************************************************
+	; Dial Mode:
+	; -Dials contents of ascii buffer, starting from location pointed
+	;  to by ascii_index.
+	; -Responds to these commands:
+	; 	0-9, *, #	- Dials the specified number
+	;	,		- Pause for 2 seconds
+	; -Jumps to data mode after dialing.
+	;**************************************************************************
+DIAL_MODE
+		clrb	sine_gen_en			; Disable sine generation
+		clrb	fsk_tx_en			; Disable fsk generation
+		clrb	dtmf_gen_en			; Disable dtmf generation
+		clrb	hook				; go off-hook
+		mov	m,#$0f
+		mov	w,#%01101010			; rb.5 (cntrl_3) is tristate, rb.2 (cntrl_1) is low
+		mov	!rb,w			
+		clrb	cntrl_1				; Enable lowest low-pass filter on output
+		mov	w,#40				; delay 4 seconds before dialing
+		call	@delay_100n_ms
+		mov	w,#_CR				; Send a carriage return
+		call	@send_string			
+		mov	w,#_DIALING			; send "Dialing" to screen
+		call	@send_string
+		bank	serial
+
+:dial_loop	call	@buffer_get			; Get a character from the buffer
+		call	@uppercase			; convert it to uppercase
+		mov	w,byte				; test byte for zero
+		snz
+		jmp	:originate_mode			; If byte is zero, dialing is done.
+		call	@send_byte
+		cje	byte,#',',:pause		; if the character = ',', pause for 2s
+		call	@digit_2_index			; convert the ascii digit to an 
+							; index value
+		call	@load_frequencies		; load the frequency registers
+		call	@dial_it			; dial the number for 60ms and return.
+:inc		call	@inc_pop_index			; increment the index into the table
+		jmp	:dial_loop
+:pause
+		mov	w,#20				; delay 2s
+		call	@delay_100n_ms
+		jmp	:inc
+
+
+:originate_mode
+	;******************************************************************
+	; Set/clear proper flags for origination
+	;******************************************************************
+		bank	fsk_transmit_bank	
+		clr	fsk_tx_divide_2		; clear the transmit-divider
+		clr	flags			; clear all flags.
+		clrb	fsk_answering		; we are not answering.
+		setb	fsk_tx_bit		; set the transmit bit to logic '1'
+		setb	sine_gen_en		; enable the sine generators
+		setb	fsk_tx_en		; enable the fsk transmitter
+		mov	w,#50			; delay 5 seconds after dialing to wait for carrier
+		call	@delay_100n_ms	
+		jb	carrier_detected,FSK_IO	; if there still is no carrier, exit
+		mov	w,#50			; delay 5 seconds after dialing to wait for carrier
+		call	@delay_100n_ms	
+		jb	carrier_detected,FSK_IO	; if there still is no carrier, exit
+		mov	w,#100			; delay 10 seconds after dialing to wait for carrier
+		call	@delay_100n_ms	
+		jb	carrier_detected,FSK_IO
+		mov	w,#150			; delay 15 seconds after dialing to wait for carrier
+		call	@delay_100n_ms	
+		jb	carrier_detected,FSK_IO
+no_carrier
+		clrb	fsk_rx_en
+		setb	tx_pin
+		mov	w,#80			; give carrier 8 more seconds to re-appear
+		call	@delay_100n_ms
+		jb	carrier_detected,FSK_IO_AGAIN
+		mov	w,#_no_carrier
+		call	@send_string
+		jmp	INITIALIZE
+				
+
+	;******************************************************************
+	; Once at FSK I/O mode, the program sends/receives data.  In 
+	; originate mode, the send is at 75bps and the receive is at 1200bps.
+	; Because of the difference in baud rates, hardware flow control
+	; is used.  CTS is disabled when the buffer is close to capacity,
+	; and re-enabled when the buffer is completely empty.
+	;******************************************************************
+FSK_IO
+
+
+		mov	w,#_DATA_MODE		; Send "connect" message
+		call	@send_string
+FSK_IO_AGAIN	clr	plus_count		; clear the plus count
+		clr	push_index		; clear the push pointer to buffer
+		clr	pop_index		; clear the pop pointer to buffer
+		setb	fsk_rx_en		; enable the FSK reception part of ISR
+		mov	m,#$0f
+		mov	w,#%01101010		; rb.5 (cntrl_3) is tristate, rb.2 (cntrl_1) is low
+		mov	!rb,w			
+		clrb	cntrl_1			; Enable lowest low-pass filter on output
+		clrb	cts			; clear CTS to tell PC "ready for data"
+	;******************************************************************
+	; This is the main loop for FSK I/O.  Sends FSK bytes, and receives
+	; bytes from the UART.  The FSK receive portion of FSK I/O is completely
+	; handled by the ISR
+	;******************************************************************
+
+:loop2		
+		
+		jnb	timer_flag,:no_timeout	; if (timer_flag)
+		bank	serial	
+		test	plus_count		;	if (plus_count)
+		jz	:no_timeout
+		mov	w,plus_count		;		if (plus_count==3)
+		xor	w,#3			;			return;
+		snz
+		retw	0
+		jmp	:clr_plus_count		;		else clr_plus_count();
+						;	else no_timout();
+						; else no_timeout();
+:no_timeout	jnb	carrier_detected,no_carrier
+		jb	rx_flag,:got_byte	; Received a byte of data.  Handle it. 
+		bank	fsk_transmit_bank	; If no byte, check to see if we need to transmit
+		test	fsk_tx_count		; Are we transmitting anything?  
+		sz				;	if no, then send next byte.
+		jmp	:loop2			; 	else jump here forever (ISR does all the work)
+		
+		mov	w,pop_index		; If pop_index == push_index, everything in the buffer has been sent.
+		xor	w,push_index
+		sz
+		jmp	:not_empty_yet		
+	;******************************************************************
+	; The buffer is empty: initialize the buffer and enable CTS.
+	;******************************************************************
+
+:empty
+		clr	push_index		; so clear the buffer indexes
+		clr	pop_index
+		clrb	cts			; and clear cts to allow more data from DCE
+		jmp	:loop2
+	;******************************************************************
+	; The buffer is not empty, keep sending stuff..
+	;******************************************************************
+:not_empty_yet
+		call	@buffer_get		; if the buffer is not empty, get the next byte 
+		call	@fsk_send_byte		; from the buffer and send it via. FSK
+		call	@inc_pop_index		; and increment the pop index
+		and	pop_index,#$0f
+		jmp	:loop2
+	;******************************************************************
+	; The we just received a byte, so put it on the buffer.
+	;******************************************************************
+:got_byte
+
+		bank	serial
+		clrb	rx_flag
+		mov	byte,rx_byte
+		call	@buffer_push
+	;******************************************************************
+	; Check to see if the pop index is at (push index + 5)
+	;******************************************************************
+		and	push_index,#$0f
+		mov	w,#5
+		
+		add	w,push_index
+		and	w,#$0f			; keep push index < 16
+		xor	w,pop_index		; if (push_index + 5 == pop_index, the buffer is almost full so indicate this)
+		snz
+		setb	cts			; If push index == pop index, disable CTS
+		bank	serial
+		mov	w,#'+'			; If the byte = '+', increment plus_count, otherwise, plus_count == 0
+		xor	w,rx_byte		; If byte = '+'
+		jz	:plus_received		;	plus_received();
+		
+:clr_plus_count					; Else
+		clr	plus_count		; 	clr_plus_count();
+		mov	w,#255			; 	
+		call	@reset_timers		; 	
+		jmp	:loop2			; 
+		
+:plus_received					; plus_received();
+ 		test	plus_count		; If !(plus_count)
+		jz	:zero_plus_count	;	zero_plus_count();
+:some_pluses	jb	timer_flag,:clr_plus_count; else if (timer_flag)
+:inc_plus_count	inc	plus_count		;		clr_plus_count();
+		mov	w,#200			;	else
+		call	@reset_timers		;		inc_plus_count();
+		jmp	:loop2
+
+:zero_plus_count
+		sb	timer_flag		; If (timer_flag)
+		jmp	:clr_plus_count		;	clr_plus_count();
+		jmp	:inc_plus_count		; else	inc_plus_count
+
+;**************************************************************************
+; Miscellaneous subroutines....
+;**************************************************************************
+org	$200
+;**************************************************************************
+reset_timers
+; This subroutine times 'w' ticks, and returns with a '1' in w when 
+; the specified time has timed out.  Each tick is 13.35296 ms.
+; This subroutine uses the TEMP2 register.  Call this routine with w = 0
+; to poll for a time_out.
+;**************************************************************************
+	bank	timers
+	not	w
+	inc	wreg
+	mov	timer_h,w
+	clr	timer_l
+	clrb	timer_flag
+	retp
+	
+;**************************************************************************
+buffer_push
+; This subroutine pushes the contents of byte onto the 64-byte ascii buffer. 
+;**************************************************************************
+	bank	serial			; Move the byte into the buffer
+	mov	temp,byte
+	mov	fsr,#buffer
+	add	fsr,push_index
+	mov	indf,temp
+					; Increment index and keep it in range
+	call	@inc_push_index
+	mov	fsr,#buffer	; Null terminate the buffer.
+	add	fsr,push_index
+	clr	indf
+	bank	serial
+	retp
+;**************************************************************************
+;**************************************************************************
+buffer_backspace
+; This subroutine deletes one value of the buffer and decrements the index 
+;**************************************************************************
+	dec	push_index
+	and	push_index,#%01101111
+
+	mov	fsr,#buffer
+	add	fsr,push_index
+	clr	indf
+	bank	serial
+	retp
+;**************************************************************************
+inc_pop_index
+;**************************************************************************
+	mov	fsr,#pop_index
+	jmp	inc_index
+;**************************************************************************
+inc_push_index
+;**************************************************************************
+	mov	fsr,#push_index
+;**************************************************************************
+inc_index
+; This subroutine increments the index into the buffer
+;**************************************************************************
+	mov	w,indf
+	and	w,#%00001111
+	xor	w,#%00001111
+	jnz	:not_on_verge
+	inc	indf
+	mov	w,#16
+	add	w,indf
+	and	w,#$7f
+	mov	indf,w
+	retp
+:not_on_verge
+	inc	indf
+	retp
+;**************************************************************************
+buffer_get
+; This subroutine retrieves the buffered value at index
+;**************************************************************************
+	mov	fsr,#buffer
+	add	fsr,pop_index
+	mov	w,indf
+	bank	serial
+	mov	byte,w
+	
+	retp
+;**************************************************************************
+delay_10n_ms
+; This subroutine delays 'w'*10 milliseconds. (not exactly, but pretty close)
+; This subroutine uses the TEMP register
+; INPUT		w	-	w/10 milliseconds to delay for.
+; OUTPUT	Returns after 10 * n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 10ms
+	mov	timer_h,#$0ff
+	mov	timer_l,#$041
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;**************************************************************************
+delay_100n_ms
+; This subroutine delays 'w'*100 milliseconds. (not exactly, but pretty close)
+; This subroutine uses the TEMP register
+; INPUT		w	-	w/100 milliseconds to delay for.
+; OUTPUT	Returns after 100 * n milliseconds.
+;**************************************************************************
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 10ms
+	mov	timer_h,#$0f8
+	mov	timer_l,#$083
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;**************************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;**************************************************************************
+; Subroutine - Disable the outputs
+; Load DC value into PDM and disable the output switch.
+;**************************************************************************
+disable_o
+		bank	PDM_bank	; input mode.
+		mov	PDM0_out,#128	; put 2.5V DC on PDM output pin
+		clrb	sine_gen_en
+		clrb	dtmf_gen_en
+		clrb	fsk_tx_en
+		retp
+;**************************************************************************
+init
+;	Initializes the program.
+;**************************************************************************
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+
+		setb	hook			; go on hook.
+		clrb	cts
+		setb	led_pin			; turn on LED
+		clr	flags			; Clear all flags
+		call	zero_ram
+		call	@disable_o
+
+		retp
+;**************************************************************************
+; Subroutine - Get byte via serial port and echo it back to the serial port
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in rx_byte
+;**************************************************************************
+get_byte     	jnb     rx_flag,$		;wait till byte is received
+		clrb    rx_flag			;reset the receive flag
+		bank	serial			;switch to serial bank
+		mov     byte,rx_byte		;store byte (copy using W)
+						; & fall through to echo char back
+;**************************************************************************
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;**************************************************************************
+send_byte    	bank    serial
+
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+		RETP                            ;leave and fix page bits
+
+;**************************************************************************
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;**************************************************************************
+fsk_send_byte  	bank    fsk_serial_bank
+
+:wait        	test    fsk_tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     fsk_tx_high,w               ; store data byte
+		setb    fsk_tx_low.7                ; set up start bit
+		mov     fsk_tx_count,#10            ;1 start + 8 data + 1 stop bit
+		RETP                            ;leave and fix page bits
+
+;**************************************************************************
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;**************************************************************************
+send_string	bank	serial
+ 		mov     string,w                ;store string address
+:loop        	mov     w,string                ;read next string character
+		mov     m,#3                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ;reset the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		RETP                            ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+;**************************************************************************
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+; OUTPUTS:
+;	byte	-	The uppercase byte
+;**************************************************************************
+uppercase    	
+		csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+		
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+
+org	$300
+;**************************************************************************
+; String data (for RS-232 output) and tables
+;**************************************************************************
+_hello          dw      13,10,'V.23 Originate V.1.37',13,10,0
+_instructions	dw	'- ? For Help',0
+_DIALING	dw	'DIAL ',0
+_PROMPT		dw	13,10,'>',0
+_OK		dw	'OK',13,10,0
+_CR		dw	13,10,0
+_DATA_MODE	dw	13,10,'CONNECT 1275',13,10,0
+_no_carrier	dw	13,10,'NO CARRIER',0
+_HELP		dw	13,10,'ATDT- Dial',13,10,'ATH - Hang Up',13,10,'ATO - Data Mode',13,10,'ATZ - Init',13,10,'+++ - Command Mode',0
+
+;**************************************************************************
+org	$400	; FSK subroutines and the Interrupt Service Routine.
+;**************************************************************************
+answer_tone
+;	This subroutine sends out an answer tone of 2100Hz for 3 seconds.
+;**************************************************************************
+		bank	sine_gen_bank		; send out the answer tone for 3 seconds
+		clr	curr_sine
+		mov	freq_count_high2,#f2100_h 
+		mov	freq_count_low2,#f2100_l
+		setb	sine_gen_en		; enable the FSK transmitter
+		mov	w,#30
+		call	@delay_100n_ms		
+		retp
+;**************************************************************************
+; THESE ROUTINES ARE RUN WITHIN THE ISR... DO NOT CALL THEM FROM THE MAINLINE.
+;**************************************************************************
+;******************************************************************************
+carrier_detect
+		bank	carrier_detect_bank
+		inc	cd_trans_count
+		jnz	:no_rollover
+		dec	cd_trans_count
+		jmp	:sample
+:no_rollover
+		mov	w,rb
+		xor	w,cd_rb_past_state
+		and	w,#%00000010
+		snz
+		retp
+		xor	cd_rb_past_state,w
+		sb	cd_rb_past_state.1
+		retp
+:sample
+		mov	w,cd_trans_count
+		add	cd_trans_avg_l,w
+		snc
+		inc	cd_trans_avg_h
+		clr	cd_trans_count
+		inc	cd_avg_count
+		sz
+		retp
+		setb	carrier_detected
+		mov	w,#-8
+		add	w,cd_trans_avg_h
+		sc
+		clrb	carrier_detected
+		mov	w,#-16
+		add	w,cd_trans_avg_h
+		snc
+		clrb	carrier_detected
+		clr	cd_trans_avg_h
+		clr	cd_trans_avg_l
+		retp
+;**************************************************************************
+fsk_receive_main	; This code is speed critical and runs in every
+			; ISR.  It increments the FSK transition couters
+			; and checks for a transition.  If a transition 
+			; has occured, it sets a flag, and saves the 
+			; transition count for later processing by the
+			; fsk_receive_processing1 subroutine.
+;**************************************************************************
+		bank	fsk_receive_bank
+		sb	fsk_rx_en
+		retp
+		inc	fsk_trans_count
+		snz
+		dec	fsk_trans_count
+		mov	w,fsk_rb_past_state
+		xor	w,rb
+		and	w,#%00000010
+		snz
+		retp
+		xor	fsk_rb_past_state,w
+		setb	fsk_processing_required_1
+		mov	fsk_temp_trans,fsk_trans_count
+		clr	fsk_trans_count
+		retp
+;**************************************************************************
+fsk_receive_main_2	; This code removes some of the jitter away from
+			; the low frequency detection algorithm by
+			; continuously checking the transition count
+			; to see if it has now reached a point where it
+			; is safe to say that there is no high frequency
+			; present.
+;**************************************************************************
+		bank	fsk_receive_bank
+		sb	fsk_rx_en
+		retp
+		mov	w,#-(threshold+fsk_hysterises)
+		add	w,fsk_trans_count
+		snc
+;		setb	fsk_rx_bit
+;		setb	test_pin
+		setb	tx_pin
+		add	w,fsk_last_trans
+		snc
+;		setb	test_pin
+;		setb	fsk_rx_bit
+		setb	tx_pin
+		retp
+;**************************************************************************
+fsk_receive_processing1	; This subroutine runs only when a transition has
+			; occurred.  It adds the last transition count
+			; to the current one and checks this against the
+			; high/low frequency threshold.  If the transition
+			; count is below the threshold, the fsk_rx_bit
+			; flag is cleared.
+;**************************************************************************
+	bank	fsk_receive_bank
+	sb	fsk_processing_required_1
+	retp					; Exit if disabled
+	clrb	fsk_processing_required_1	
+	mov	w,#-25				; compare the transition count with 5
+	add	w,fsk_temp_trans		
+	jnc	:glitch				; If the transition count is less than 5, handle the glitch.
+	mov	w,#-(threshold-fsk_hysterises)	; compare the transition count with
+	add	w,fsk_temp_trans		; the threshold (-hysterises)
+	snc
+	mov	w,#$ff
+	add	w,fsk_last_trans		
+	sc
+;	clrb	test_pin
+;	clrb	fsk_rx_bit
+	clrb	tx_pin				; Clear the TX_PIN if the transition count is less than the threshold
+	mov	fsk_last_trans,fsk_temp_trans	; save the last transition count.
+	retp
+:glitch
+	mov	w,fsk_last_trans		; of the last transition
+	add	w,fsk_temp_trans
+	snc
+	mov	w,#$ff
+	mov	fsk_last_trans,w	
+	retp
+;**************************************************************************
+task_manager
+; This portion of the ISR allows 1 of 16 separate tasks to run in each
+; interrupt.
+;**************************************************************************
+		inc	task_switcher
+		mov	w,task_switcher
+		and	w,#$0f
+		jmp	pc+w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		;*** TASKS ***
+		jmp	fsk_receive_main_2	;0
+		jmp	transmit		;1
+		jmp	receive			;2
+		jmp	fsk_transmit_uart 	;3
+		jmp	fsk_receive_main_2	;4
+		jmp	transmit_fsk		;5
+		jmp	do_timers		;6
+		jmp	fsk_receive_processing1	;7
+		jmp	fsk_receive_main_2	;8
+		jmp	carrier_detect		;9
+		retp				;10
+		retp				;11
+		jmp	fsk_receive_main_2	;12
+		retp				;13
+		retp				;14
+		retp				;15
+		jmp	fsk_receive_main_2	;16
+		retp				; (just in case)	
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+fsk_transmit_uart
+; This is an asynchronous RS-232 transmitter
+; INPUTS:
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;**************************************************************************
+		bank	fsk_serial_bank
+		sb	fsk_answering
+		inc	fsk_tx_divide_2
+		and	fsk_tx_divide_2,#$0f	    ; Divide the 1200bps UART by 16 to
+						    ; achieve 75bps
+		sz	
+		retp
+		clrb    fsk_tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     fsk_tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     fsk_tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    fsk_tx_count                ;are we sending?
+		snz
+		retp			        ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      fsk_tx_high                 ; and shift to next bit
+		rr      fsk_tx_low                  ;
+		dec     fsk_tx_count                ;decrement bit counter
+		movb    fsk_tx_bit,/fsk_tx_low.6        ;output next bit
+		retp
+;**************************************************************************
+transmit
+; This is an asynchronous RS-232 transmitter
+; INPUTS:
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;**************************************************************************
+		bank	serial
+		clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    tx_count                ;are we sending?
+		snz
+		retp			        ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+		retp
+;**************************************************************************
+receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;**************************************************************************
+		bank	serial
+		movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		jnz     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ;middle of next bit?
+		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		snz                             ;if so
+		setb    rx_flag                 ;  then set flag
+:rxdone
+		retp
+;**************************************************************************
+do_timers
+; The 24-bit timer increments every 52.16us when called by task_manager.
+;**************************************************************************
+		bank	timers			; Update the timers
+		inc	timer_l
+		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+		snz
+		inc	timer_hh
+		snz
+		dec	timer_hh
+		setb	led_pin
+		sb	timer_h.2
+		clrb	led_pin
+		retp
+;**************************************************************************
+transmit_fsk
+;**************************************************************************
+		bank	fsk_transmit_bank
+		sb	fsk_tx_en
+		retp
+		jb	fsk_answering,transmit_answer_tones
+transmit_originate_tones
+		jnb	fsk_tx_bit,:low_bit
+:high_bit
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f390_h
+		mov	freq_count_low2,#f390_l
+		retp
+:low_bit
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f450_h
+		mov	freq_count_low2,#f450_l
+		retp
+transmit_answer_tones
+		jnb	fsk_tx_bit,:low_bit
+:high_bit
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f1300_h
+		mov	freq_count_low2,#f1300_l
+		retp
+:low_bit	
+		bank	sine_gen_bank
+		mov	freq_count_high2,#f2100_h
+		mov	freq_count_low2,#f2100_l
+		retp
+;******************************************************************************
+; Interrupt
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+ISR
+;******************************************************************************
+FSK_output
+		jnb	dtmf_gen_en,:dtmf_disabled
+		call	@sine_generator1
+		call	@DTMF_twist
+		jmp	:task_switcher
+:dtmf_disabled
+		jnb	sine_gen_en,:task_switcher  ; Output the frequencies set by the freq_count registers
+		call	@sine_generator2
+		call	@SINE_out		; Output each discrete value of the sine table
+		call	fsk_receive_main
+:task_switcher
+		call	task_manager
+;******************************************************************************
+ISR_DONE
+; This is the end of the interrupt service routine.  Now load -163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;******************************************************************************
+; End of the Interrupt Service Routine
+;******************************************************************************
+
+;**************************************************************************
+org	$600			; These subroutines are on page 3.
+;**************************************************************************
+; DTMF transmit functions/subroutines
+;**************************************************************************
+;**************************************************************************
+DTMF_TABLE	; DTMF tone constants
+; This routine returns with the constant used for each of the frequency
+; detectors.
+; INPUT:	w	-	Index into the table (0-15 value)
+; OUTPUT:	w	-	Constant at that index
+;**************************************************************************
+		jmp	PC+w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	f697_l
+		retw	f697_h			
+		retw	f770_l
+		retw	f770_h
+		retw	f852_l
+		retw	f852_h	
+		retw	f941_l
+		retw	f941_h
+		retw	f1209_l
+		retw	f1209_h
+		retw	f1336_l
+		retw	f1336_h
+		retw	f1477_l
+		retw	f1477_h
+		retw	f1633_l
+		retw	f1633_h
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+ASCII_TABLE	; Ascii value at index (0-15)
+; INPUT:	w	-	Index into the table (0-15 value)
+; OUTPUT:	w	-	Constant at that index
+;**************************************************************************
+		jmp	PC+w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+		retw	'1'
+		retw	'2'			
+		retw	'3'
+		retw	'A'
+		retw	'4'
+		retw	'5'	
+		retw	'6'
+		retw	'B'
+		retw	'7'
+		retw	'8'
+		retw	'9'
+		retw	'C'
+		retw	'*'
+		retw	'0'
+		retw	'#'
+		retw	'D'
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.
+;**************************************************************************
+index_2_digit
+; This subroutine converts a digit from 0-9 or a '*' or a '#' to a table 
+; lookup index which can be used by the load_frequencies subroutine.  To use
+; this routine, pass it a value in the 'byte' register.  No invalid digits
+; are used. (A, B, C, or D)
+;**************************************************************************
+		call	ASCII_TABLE
+		retp
+;**************************************************************************
+digit_2_index
+; This subroutine converts a digit from 0-9 or a '*' or a '#' to a table 
+; lookup index which can be used by the load_frequencies subroutine.  To use
+; this routine, pass it a value in the 'byte' register.  No invalid digits
+; are used. (A, B, C, or D)
+;**************************************************************************
+		bank	serial
+		clr	temp
+:loop
+		mov	w,temp
+		call	ASCII_TABLE
+		xor	w,byte
+		jz	:done
+		inc	temp
+		jb	temp.4,:done
+		jmp	:loop
+
+:done		mov	w,temp
+		retp
+		
+;**************************************************************************
+load_frequencies
+; This subroutine loads the frequencies using a table lookup approach.
+; The index into the table is passed in the byte register.  The DTMF table
+; must be in the range of $400 to $500.
+;**************************************************************************
+		mov	temp,w
+		bank	sine_gen_bank
+
+		mov	w,>>temp
+		and	w,#%00000110
+		call	DTMF_TABLE
+		mov	freq_count_low,w
+
+		mov	w,>>temp
+		and	w,#%00000110
+		inc	wreg
+		call	DTMF_TABLE
+		mov	freq_count_high,w
+
+		rl	temp
+		setb	temp.3
+		mov	w,temp
+		and	w,#%00001110
+		mov	temp,w
+		call	DTMF_TABLE
+		mov	freq_count_low2,w
+
+		mov	w,temp
+		inc	wreg
+		call	DTMF_TABLE
+		mov	freq_count_high2,w
+		retp		
+		
+;**************************************************************************
+dial_it		; This subroutine puts out whatever frequencies were loaded
+		; for 100ms, and then stops outputting the frequencies.
+;**************************************************************************
+		bank	sine_gen_bank
+		clr	sine_index
+		clr	sine_index2
+		mov	w,#1
+		call	@delay_100n_ms		; delay 100ms
+		setb	dtmf_gen_en
+		mov	w,#1
+		call	@delay_100n_ms		; delay 100ms
+		clrb	dtmf_gen_en
+		call	@disable_o		; now disable the outputs
+:end_dial_it	retp
+;**************************************************************************
+sine_generator1 					;(Part of interrupt service routine)
+; This routine generates a sine wave with values from the sine table
+; at the end of this program.  Frequency is specified by the counter.  To set
+; the frequency, put this value into the 16-bit freq_count register:
+; freq_count = FREQUENCY * 6.83671552 (@50MHz)
+;**************************************************************************
+		bank	sine_gen_bank
+		clrb	swCarryFlag
+		add	freq_acc_low,freq_count_low
+		snc
+		setb	swCarryFlag
+		add	freq_acc_high,freq_count_high
+		snb	swCarryFlag
+		inc	freq_acc_high
+		snz
+		jmp	:change			; if zero, this definetely caused a rollover.
+
+		sc
+		jmp	:no_change
+:change		inc	sine_index
+		mov	w,sine_index
+		and	w,#$1f
+		call	sine_table
+		mov	curr_sine,w		;1	
+
+:no_change
+
+;**************************************************************************
+sine_generator2						;(Part of interrupt service routine)
+; This routine generates a sine wave with values from the sine table
+; at the end of this program.  Frequency is specified by the counter.  To set
+; the frequency, put this value into the 16-bit freq_count register:
+; freq_count = FREQUENCY * 6.83671552 (@50MHz)
+;**************************************************************************
+		bank	sine_gen_bank
+		clrb	swCarryFlag
+		add	freq_acc_low2,freq_count_low2
+		snc
+		setb	swCarryFlag
+		add	freq_acc_high2,freq_count_high2
+		snb	swCarryFlag
+		inc	freq_acc_high2
+		snz
+		jmp	:change			; if zero, this definetely caused a rollover.
+
+		sc
+		jmp	:no_change
+:change		inc	sine_index2
+		mov	w,sine_index2
+		and	w,#$1f
+		call	sine_table
+		mov	curr_sine2,w
+:no_change
+		retp
+;**************************************************************************
+SINE_out
+; This subroutine moves the FSK output to the PDM register
+;**************************************************************************
+		bank	sine_gen_bank
+		
+		mov	w,#127
+		add	w,curr_sine2
+		mov	PDM0_out,w
+		retp
+;**************************************************************************
+DTMF_twist
+; This subroutine adds twist to the high frequency of the DTMF output.
+;**************************************************************************
+		bank	sine_gen_bank
+		mov	PDM0_out,curr_sine2			; mov sin2 into PDM0
+		rr	wreg
+		rr	wreg
+		and	w,#$3f
+		snb	wreg.5
+		or	w,#$C0
+		add	PDM0_out,w				; (1.25)(sin2) = sin2 + (0.25)(sin2)
+		
+		add	PDM0_out,curr_sine			; add the value of SIN into the PDM output
+		
+		add	PDM0_out,#128			; for result = PDM0 = 1.25*sin2 + 1*sin
+		retp					; return with page bits intact
+;******************************************************************************
+sine_table
+; The values in this table can be changed to increase/decrease the amplitude of
+; the output sine wave.
+; This sine table gives an output level of approximately -15dB into a 600 ohm
+; impedance
+;******************************************************************************
+	
+	jmp	pc+w
+tableStart	; Will cause a compiler error if not located in the lower half of a page.
+	retw	0
+	retw	4
+	retw	8
+	retw	11
+	retw	14
+	retw	16
+	retw	18
+	retw	19
+	retw	20
+	retw	19
+	retw	18
+	retw	16
+	retw	14
+	retw	11
+	retw	8
+	retw	4
+	retw	0
+	retw	-4
+	retw	-8
+	retw	-11
+	retw	-14
+	retw	-16
+	retw	-18
+	retw	-19
+	retw	-20
+	retw	-19
+	retw	-18
+	retw	-16
+	retw	-14
+	retw	-11
+	retw	-8
+	retw	-4
+tableEnd	; Will cause a compiler error if not located in the lower half of a page.			; Will cause a compiler error if not locat
+;******************************************************************************
+;        Copyright © 1998 Scenix Semiconductor, Inc. All rights
+;        reserved.
+;        
+;        Scenix Semiconductor, Inc. assumes no responsibility or liability for
+;        the use of this [product, application, software, any of these products].
+;        
+;        Scenix Semiconductor conveys no license, implicitly or otherwise, under
+;        any intellectual property rights.
+;        Information contained in this publication regarding (e.g.: application,
+;        implementation) and the like is intended through suggestion only and may
+;        be superseded by updates. Scenix Semiconductor makes no representation
+;        or warranties with respect to the accuracy or use of these information,
+;        or infringement of patents arising from such use or otherwise.
+;        
+;        Scenix Semiconductor products are not authorized for use in life support
+;        systems or under conditions where failure of the product would endanger
+;        the life or safety of the user, except when prior written approval is
+;        obtained from Scenix Semiconductor.
+;******************************************************************************

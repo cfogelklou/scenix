@@ -1,0 +1,61 @@
+MainInfoSeg	MACRO
+;********************************************************************************
+;  Main Code
+;********************************************************************************
+		ENDM
+
+MainCodeSeg	MACRO
+;********************************************************************************
+;  Main Code
+;********************************************************************************
+
+ledRX		=	ra.0
+ledTX		=	ra.1
+ledCON		=	ra.2
+ledERR		=	ra.3
+
+Startup
+	mov	m, #TRIS
+	mov	 ra, #%0000		;init Port A
+	mov	!ra, #%0000		;Port A (LEDs) - Outputs
+
+	mov	 rb, #%00001100		;init rb - UartTx (bit 2) and UartCTS (bit 3) = idle high
+	mov	!rb, #%01110011		;Direction
+	mov	m, #PLP
+	mov	!rb, #%11001111		;Enable pullup on unused pins (bits 4 and 5)
+	mov	m, #WKED
+	mov	!rb, #%11111110		;IrRx (bit 6) = falling edge, UartRx (bit0) = rising edge
+
+	clr	rc			;Init output to 0
+	mov	m, #TRIS
+	mov	!rc, #%10101011		;Port C (IO Port) direction - set for jumper use
+	mov	m, #PLP
+	mov	!rc, #%01010100		;Port C (IO Port) pullup - enabled on input pins
+
+	clr	fsr			;reset all ram banks
+:loop	setb	fsr.4
+	clr	ind
+	ijnz	fsr,:loop
+
+	pcall	IsrInit
+
+	pcall	a2flReset
+	pcall	a2plReset
+	pcall	a2lapReset
+	pcall	a2lmpReset
+	pcall	a2appReset
+
+Asynchronous				;Note: flags are global
+	snb	IrdaRxAvail		;Irda byte received ?
+	pcall	a2flRxAvail
+	snb	IrdaTxEmpty		;Irda TxEmpty flag set ?
+	pcall	a2flTxEmpty
+	snb	UartRxAvail		;Uart byte received ?
+	pcall	a2appRxAvail
+	snb	TimerOverflow		;Timer Overflow flag set ?
+	pcall	a2lapTimer
+	jmp	Asynchronous
+
+;********************************************************************************
+
+		ENDM

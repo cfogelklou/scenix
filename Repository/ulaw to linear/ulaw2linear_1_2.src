@@ -1,0 +1,490 @@
+;******************************************************************************
+; Copyright © [04/11/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+; SX ulaw conversion demo
+;
+; Filename:	ulaw2linear_1_2.src
+;
+; Author:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor Inc.
+;
+; Revision:	1.2
+;
+; Part:		SX28AC rev. 5.0
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.04
+;
+; Program Description:
+;
+;	This program is written to run on the Parallax SX-DEMO board
+;	
+;	This program requires a PC to interface with.  The communications
+;	settings are 19200,N,8,1
+;
+;	On startup, this program outputs the heading "SX ulaw converter"
+;	It then waits for the user to type in valid hex characters.  
+;	It converts each 8-bit hex byte to a 16-bit hex byte, and outputs
+;	the result.
+;
+;	1.2 Added some documentation to proof-of-concept, for public posting.
+;
+;******************************************************************************
+; Device Directives
+;******************************************************************************
+SX28L_compiler
+IFDEF SX28L_compiler
+		device	SX28L,oscxtmax			; 28-pin device, 4 pages, 8 banks of RAM
+		device	turbo,stackx_optionx		; High speed oscillator, turbo mode,
+							; option register extend, 8-level stack
+ELSE
+                device  pins28,pages4,banks8,oschs
+                device  turbo,optionx,stackx
+ENDIF
+                id      'wakeup'
+                reset   start
+                freq    50_000_000
+
+;**************************************************************************
+; Equates for certain baud rates: 19200 baud
+;**************************************************************************
+baud_bit	=       4                       ;for 19200 baud
+start_delay	=       16+8+1                  ; "    "     "
+int_period	=       163                     ; "    "     "
+; *** 2400 baud (for slower baud rates, increase the RTCC prescaler)
+;baud_bit	=       7                       ;for 2400 baud
+;start_delay	=       128+64+1                ; "    "    "
+;int_period	=       163                     ; "    "    "
+
+;**************************************************************************
+; Watches (for debug in SX-Key V.1.0+)
+;**************************************************************************
+
+watch	ulawbyte,8,uhex
+watch	sign,8,uhex
+watch	exponent,8,uhex
+watch	mantissa_l,16,uhex
+watch	sample_l,16,sdec
+watch	sample_l,16,shex
+watch	wreg,8,uhex
+watch	wreg,8,udec
+;*********************************************************
+; Pin Definitions
+;*********************************************************
+;SX_MODEM_BOARD
+SX_DEMO_BOARD
+IFDEF	SX_DEMO_BOARD
+rx_pin          EQU     ra.2                    ;UART receive input
+tx_pin          EQU     ra.3                    ;UART transmit output
+ENDIF
+IFDEF	SX_MODEM_BOARD
+rx_pin		EQU	ra.1
+tx_pin		EQU	ra.2
+ENDIF
+;*********************************************************
+; Global Registers
+;*********************************************************
+	org	$8
+
+	flags	ds	1
+	rx_flag	equ	flags.0
+	temp	ds	1
+	task	ds	1
+;*********************************************************
+; Bank 1 Registers
+;*********************************************************
+	org	$10
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+string		ds	1
+byte		ds	1
+hex		ds	1
+
+;*********************************************************
+	org	$30
+;*********************************************************
+
+	u_law_bank	=	$
+
+	ulawbyte	ds	1
+	sign		ds	1
+	exponent	ds	1
+	mantissa_l	ds	1
+	mantissa_h	ds	1
+	sample_l	ds	1
+	sample_h	ds	1	
+
+;**************************** INTERRUPT CODE *******************************
+;
+; Note: The interrupt code must always originate at 0h.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+interrupt	org     $0                       ;interrupt starts at 0h
+	jmp	@ISR
+
+;******************************************************************************
+start
+	call	@init
+	mov	w,#_hello
+	call	@send_string
+	bank	u_law_bank
+:loop
+	mov	w,#_CR			; Send a carriage return
+	call	@send_string
+	call	@get_hex		; Get a hex value to convert
+	bank	u_law_bank
+	mov	ulawbyte,w		
+	call	ulaw2linear; 101 cycles worst case ; Convert it
+	mov	w,#','
+	call	@send_byte		; Send a ','
+	bank	u_law_bank
+	mov	w,sample_h		; Send out the converted 16-bit value
+	call	@send_hex
+	bank	u_law_bank		
+	mov	w,sample_l
+	call	@send_hex
+	jmp	:loop			; Do all over again
+
+;*********************************************************
+ulaw2linear	; Converts an 8-bit compressed u-law value in
+		; ulawbyte to a 16-bit linear value in 
+		; sample_h and sample_l
+;*********************************************************
+	bank	u_law_bank	;1
+	mov	w,ulawbyte	;1
+	not	w		;1
+	mov	ulawbyte,w	;1; ulawbyte = ~ulawbyte;
+	and	w,#$0f		;1
+	mov	mantissa_l,w	;1; mantissa = (ulawbyte & 0x0f)
+	swap	mantissa_l	;1
+	clc			;1
+	rr	mantissa_l	;1
+	clr	mantissa_h	;1; mantissa = mantissa << 3
+	mov	w,ulawbyte	;1
+	swap	wreg		;1 exponent = (ulawbyte >> 4) & 0x07
+	and	w,#$07		;1
+	mov	exponent,w	;1
+	snz			;1
+	jmp	:no_exp		;1,3,17
+:loop
+	rl	mantissa_l	;1
+	rl	mantissa_h	;1
+	decsz	wreg		;1
+	jmp	:loop		;3,42 cycles worst case ; mantissa = (mantissa <<(exponent + 3))
+:no_exp
+	mov	w,exponent	;1, 60 worst case here
+	call	exp_lut_l	;9, 69
+	add	w,mantissa_l	;1
+	mov	sample_l,w	;1
+	snc			;1
+	inc	sample_h	;1,73
+
+	mov	w,exponent	;1,74
+	call	exp_lut_h	;9,83
+	add	w,mantissa_h	;1
+	mov	sample_h,w	;1; sample = exp_lut[exponent] + (mantissa<<(exponent+3))
+	snc			;1
+	inc	sample_h	;1,87
+
+	sb	ulawbyte.7	;1
+	retp			;1
+	mov	w,#$ff		;1
+	xor	sample_h,w	;1
+	xor	sample_l,w	;1
+	inc	sample_l	;1
+	snz			;1
+	inc	sample_h	;1
+				; if (sign != 0) sample = -sample
+	retp			;1,98 return (sample)
+;*********************************************************
+exp_lut_l;	static int exp_lut[8] = {0,132,396,924,1980,4092,8316,16764}
+;*********************************************************
+	add	pc,w		;
+	retw	$00		; 0
+	retw	$84		; 132
+	retw	$8c		; 396
+	retw	$9c		; 924
+	retw	$bc		; 1980
+	retw	$fc		; 4092
+	retw	$7c		; 8316
+	retw	$7c		; 16764
+;*********************************************************
+exp_lut_h;	static int exp_lut[8] = {0,132,396,924,1980,4092,8316,16764}
+;*********************************************************
+	jmp	pc+w
+	retw	$00		; 0
+	retw	$00		; 132
+	retw	$01		; 396
+	retw	$03		; 924
+	retw	$07		; 1980
+	retw	$0f		; 4092
+	retw	$20		; 8316
+	retw	$41		; 16764
+;*********************************************************
+	
+org	$200	; Interrupt Service Routine and other miscellaneous routines
+
+;**************************** INTERRUPT CODE *******************************
+;
+; Note: The interrupt code must always originate at 0h.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; 
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;******************************************************************************
+ISR
+;**************************************************************************
+:transmit
+; This is an asynchronous transmitter for RS-232 transmission
+; INPUTS:
+;	divider.divider_bit -	Transmitter/receiver only executes when this bit is = 1
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;**************************************************************************
+		bank	serial
+		clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    tx_count                ;are we sending?
+		JZ      :receive                ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+
+;**************************************************************************
+:receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;**************************************************************************
+		movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		jnz     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ;middle of next bit?
+		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		snz                             ;if so
+		setb    rx_flag                 ;  then set flag
+:rxdone
+;******************************************************************************
+:ISR_DONE
+; This is the end of the interrupt service routine.  Now load 163 into w and
+; perform a retiw to interrupt 163 cycles from the start of this one.  
+; (3.26us@50MHz)
+;******************************************************************************
+		mov	w,#-163		;1	; interrupt 163 cycles after this interrupt
+		retiw			;3	; return from the interrupt
+;*********************************************************************
+; Initialization Code...
+;*********************************************************************
+init
+		mov	m,#$0f
+		mov     ra,#%1111              	; Initialize data latches for
+		IFDEF	SX_DEMO_BOARD
+		mov	!ra,#%0111		; port A.
+		ENDIF
+		IFDEF	SX_MODEM_BOARD
+		mov	!ra,#%1011
+		ENDIF
+		call	@zero_ram
+		mov     !option,#%00011111      ; enable rtcc interrupt and wreg
+		retp
+;*********************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;**************************************************************************
+; Subroutine - Get byte via serial port and echo it back to the serial port
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in rx_byte
+;**************************************************************************
+get_byte     	jnb     rx_flag,$		;wait till byte is received
+		clrb    rx_flag		;reset the receive flag
+		bank	serial
+		mov     byte,rx_byte		;store byte (copy using W)
+						; & fall through to echo char back
+		retp
+;**************************************************************************
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;**************************************************************************
+send_byte    	bank    serial
+
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;**************************************************************************
+send_string	bank	serial
+ 		mov     string,w                ;store string address
+:loop        	mov     w,string                ;read next string character
+		mov     m,#3                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ;reset the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		RETP                            ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+;**************************************************************************
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+;**************************************************************************
+uppercase    	csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;**************************************************************************
+;**************************************************************************
+; Subroutine - Output a hex number
+; INPUTS:
+;	w	-	The byte to be output
+;**************************************************************************
+send_hex
+	mov	temp,w
+	swap	wreg
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	mov	w,temp
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	retp
+;**************************************************************************
+get_hex
+;	This routine returns with an 8-bit value in the W and in the hex 
+;	register.  It accepts a hex number from the terminal screen and
+;	returns.
+;**************************************************************************
+	bank	serial
+
+	call	:get_valid_hex
+	mov	w,byte			; send the received (good) byte
+	call	send_byte
+	swap	temp			; put the nybble in the upper nybble of
+	mov	w,temp
+	mov	hex,w			; hex register
+
+	call	:get_valid_hex
+	mov	w,byte			; send the second received byte
+	call	send_byte
+	mov	w,temp			
+	and	w,#$0f
+	or	w,hex
+	mov	hex,w
+	retp
+
+	;*******
+	:get_valid_hex	; Part of get_hex subroutine.
+	;*******
+:gh1
+	clr	temp
+	jnb	rx_flag,$		; get a byte from the terminal
+	clrb	rx_flag
+	mov	byte,rx_byte
+	call	uppercase		; uppercase it.
+:loop
+	mov	w,temp			; get the value at temp (index)
+	call	hex_table
+	xor	w,byte
+	snz				; compare it to the received byte
+	ret
+	inc	temp			; if they are equal, we have the
+	jb	temp.4,:gh1		; upper nybble.  Continue if not.
+	jmp	:loop			
+ret
+;**************************************************************************
+hex_table
+;**************************************************************************
+	add	pc,w
+	retw	'0'
+	retw	'1'
+	retw	'2'
+	retw	'3'
+	retw	'4'
+	retw	'5'
+	retw	'6'
+	retw	'7'
+	retw	'8'
+	retw	'9'
+	retw	'A'
+	retw	'B'
+	retw	'C'
+	retw	'D'
+	retw	'E'
+	retw	'F'
+;**************************************************************************
+org	$300
+;**************************************************************************
+; String data (for RS-232 output) and tables needs to be in page $300
+;**************************************************************************
+_hello          dw      13,10,'SX u-law converter',0
+_enter_hex	dw	13,10,'Enter a hex number: ',0		
+_CR		dw	13,10,0	

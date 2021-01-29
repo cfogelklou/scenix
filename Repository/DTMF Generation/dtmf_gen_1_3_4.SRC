@@ -1,0 +1,1107 @@
+;*****************************************************************************************
+; Copyright © [09/12/1998] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+;       DTMF generation utilizing 2 artificial sine wave generators in conjunction
+;	and summed internally. The program dials a pre-defined number string.
+;
+;       Length: 
+;
+;       Authors: Chris Fogelklou, Scenix Semiconductor Inc.
+;
+;       Written: 98/12/09 to 98/12/10
+;
+;	Version: 1.3.4
+;
+;	Revisions:
+;	98/12/14	Fixed bug in uppercase routine.  Changed 'ret' to retp.
+;	98/12/14	Added stack extend directive.  Put more functions in 
+;			subroutines for easy expansion.  Operation remains the same.
+;	98/12/14	Changed 'Delaynms' subroutine to 'Delay_10n_ms' for longer delays.
+;	99/01/04	Made high frequency amplitude 1.25 times greater than low 
+;			frequency amplitude. (Called "Twist") (v.1.3)
+;	99/01/04	Made "twist" code at end of sine generators more efficient.(v.1.3.1)
+;	99/01/22	Documentation!  Documentation!  Documentation (V. 1.3.2)
+;	99/10/11	Stephen Holland (V. 1.3.3)
+;			Updated device directives for all SX packages
+;			Modified for use with Scenix SX28-52 Demo Board
+;	99/10/18	Stephen Holland (V. 1.3.4)
+;			Modified for use with Scenix SX28-52 Demo Board and SX V.23 Modem
+;			Board - chosen by the define, SX_Modem
+;
+;	INPUTS:
+;	none
+;
+;	OUTPUTS:
+;	PFM DTMF signal on pfm_pin (SX Eval Board - re.4 on SX52BD, rc.4 on SX28AC,
+;	SX V.23 Modem Board - ra.0)
+;	Echoed RS-232 characters on tx_pin (ra.3)
+;	LED flashes while transmitting on led_pin (SX Eval Board - re.7 on SX52BD, rc.7 on
+;	SX28AC, SX V.23 Modem Board - rb.0)
+;
+;	RESOURCES:
+;       Program memory: 
+;
+;       Data memory:	
+;
+;       I/O Count:	2 
+;
+;	PFM_pin		re.4/rc.4/ra.0	; DTMF output
+;	led_pin	equ	re.7/rc.7/rb.0	; Flashing LED output
+;
+;*****************************************************************************************
+
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+SX28
+;SX48_52
+;SX48_52_ES
+
+;*****************************************************************************************
+; Target Board
+; Uncomment the following line to choose code modifications to operate on the Scenix designed
+; SX V.23 Modem Board. Otherwise the code is designed to operate on the Scenix SX Eval Board
+; by default. 
+;*****************************************************************************************
+SX_Modem
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+;SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oschs2,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oschs2,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52				;SX48/52/BD device directives for SX-Key
+		device	oschs2
+    ENDIF
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs2,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs2,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs2  
+    ENDIF
+  ENDIF
+ENDIF
+
+		ID	'DTMFG_13'		; Version = 1.3.2
+
+		reset	reset_entry		; JUMP to start label on reset
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+_bank	macro	1
+  noexpand
+	bank	\1
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+  expand
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+  noexpand
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+  expand
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+  noexpand
+	    ELSE
+  expand
+		clrb	fsr.7
+  noexpand
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+  noexpand
+	IFDEF SX48_52
+  expand
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+  noexpand
+	ELSE
+  expand
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+  noexpand
+	ENDIF
+	endm
+
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+		org     global_org
+
+flags		equ	global_org
+	rx_flag		equ	flags.0	; Signifies a bit recieved via. RS-232
+	dtmf_gen_en	equ	flags.1	; Signifies whether or not DTMF output is enabled
+	timer_flag	equ	flags.2	; Flags a rollover of the timers.
+
+temp		equ	global_org+1	; Temporary storage register
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+bank0		=	$
+
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+bank1		=	$
+
+sin_gen_bank	=	$
+freq_acc_high	ds	1		; 
+freq_acc_low	ds	1		; 16-bit accumulator which decides when to increment the sine wave
+
+freq_acc_high2	ds	1		; 
+freq_acc_low2	ds	1		; 16-bit accumulator which decides when to increment the sine wave
+
+freq_count_high	ds	1		; freq_count = Frequency * 6.83671552
+freq_count_low	ds	1		; 16-bit counter which decides which frequency for the sine wave
+
+freq_count_high2 ds	1		; freq_count = Frequency * 6.83671552
+freq_count_low2	ds	1		; 16-bit counter which decides which frequency for the sine wave
+
+curr_sin	ds	1		; The current value of the imitation sin wave
+sinvel		ds	1		; The velocity of the sin wave
+
+curr_sin2	ds	1		; The current value of the imitation sin wave
+sinvel2		ds	1		; The velocity of the sin wave
+
+sin2_temp	ds	1		; This register is used to do a temporary shift/add register
+
+PFM_bank	=	$
+pfm0_acc	ds	1		; PFM accumulator
+pfm0		ds	1		; current PFM output
+
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+
+timers		=	$
+timer_low	ds	1
+timer_high	ds	1
+
+dialer_bank	=	$
+string		ds	1
+byte		ds	1
+
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+bank3		=	$
+
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+
+bank4		=	$
+
+
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+
+bank5		=	$
+
+
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+
+bank6		=	$
+
+
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+
+bank7		=	$
+
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+
+bank8		=	$
+
+
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+
+bank9		=	$
+
+
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+
+bankA		=	$
+
+
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+
+bankB		=	$
+
+
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+
+bankC		=	$
+
+
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+
+bankD		=	$
+
+
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+
+bankE		=	$
+
+
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+
+bankF		=	$
+
+
+ENDIF
+;*****************************************************************************************
+; Port Assignment
+;*****************************************************************************************
+
+IFDEF SX_Modem	;modify port I/O initialization specific to the Scenix SX v.23 Modem board
+RA_latch	equ	%00001000		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11110110		;SX18/20/28/48/52 port A DDIR value
+ELSE		;SX Eval Board settings
+RA_latch	equ	%00001000		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11110111		;SX18/20/28/48/52 port A DDIR value
+ENDIF
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%11111111		;SX18/20/28/48/52 port A PLP value
+
+IFDEF SX_Modem	;modify port I/O initialization specific to the Scenix SX v.23 Modem board
+RB_latch	equ	%00000000		;SX18/20/28/48/52 port B latch init
+RB_DDIR		equ	%11111111		;SX18/20/28/48/52 port B DDIR value
+ELSE		;SX Eval Board settings
+RB_latch	equ	%00000000		;SX18/20/28/48/52 port B latch init
+RB_DDIR		equ	%11111110		;SX18/20/28/48/52 port B DDIR value
+ENDIF
+RB_ST		equ	%11111111		;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111		;SX18/20/28/48/52 port B PLP value
+
+IFDEF SX_Modem	;modify port I/O initialization specific to the Scenix SX v.23 Modem board
+RC_latch	equ	%00000000		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%11111111		;SX18/20/28/48/52 port C DDIR value
+ELSE		;SX Eval Board settings
+RC_latch	equ	%00000000		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%01100000		;SX18/20/28/48/52 port C DDIR value
+ENDIF
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+
+IFDEF SX48_52	;SX48BD/52BD Port initialization values
+RD_latch	equ	%00000000		;SX48/52 port D latch init
+RD_DDIR		equ	%11111111		;SX48/52 port D DDIR value
+RD_ST		equ	%11111111		;SX48/52 port D ST value
+RD_LVL		equ	%00000000		;SX48/52 port D LVL value
+RD_PLP		equ	%11111111		;SX48/52 port D PLP value
+
+RE_latch	equ	%00000000		;SX48/52 port E latch init
+RE_DDIR		equ	%11111111		;SX48/52 port E DDIR value
+RE_ST		equ	%11111111		;SX48/52 port E ST value
+RE_LVL		equ	%00000000		;SX48/52 port E LVL value
+RE_PLP		equ	%11111111		;SX48/52 port E PLP value
+ENDIF
+
+	;*********************************************************************************
+	; Pin Definitions
+	;*********************************************************************************
+IFDEF SX48_52
+PFM_pin		equ	re.4		; DTMF output (summed PFM output) SX28
+led_pin		equ	re.7		; LED output
+ELSE
+  IFDEF SX_Modem ;modify port I/O initialization specific to the Scenix SX v.23 Modem board
+PFM_pin		equ	ra.0		; DTMF output (summed PFM output) SX52
+  ELSE		;SX Eval Board settings
+PFM_pin		equ	rc.4		; DTMF output (summed PFM output) SX52
+  ENDIF
+
+  IFDEF SX_Modem ;modify port I/O initialization specific to the Scenix SX v.23 Modem board
+led_pin		equ	rb.0		; LED output
+  ELSE		;SX Eval Board settings
+led_pin		equ	rc.7		; LED output
+  ENDIF
+ENDIF
+
+;*****************************************************************************************
+; Program constants
+;*****************************************************************************************
+
+int_period	=	163
+
+	;*********************************************************************************
+	; Equates for DTMF tone frequencies
+	;*********************************************************************************
+f697_h		equ	$012	; DTMF Frequency
+f697_l		equ	$09d
+
+f770_h		equ	$014	; DTMF Frequency
+f770_l		equ	$090
+
+f852_h		equ	$016	; DTMF Frequency
+f852_l		equ	$0c0
+
+f941_h		equ	$019	; DTMF Frequency
+f941_l		equ	$021
+
+f1209_h		equ	$020	; DTMF Frequency
+f1209_l		equ	$049
+
+f1336_h		equ	$023	; DTMF Frequency
+f1336_l		equ	$0ad
+
+f1477_h		equ	$027	; DTMF Frequency
+f1477_l		equ	$071
+
+f1633_h		equ	$02b	; DTMF Frequency
+f1633_l		equ	$09c
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; SX48BD/52BD Mode addresses
+	; *On SX48BD/52BD, most registers addressed via mode are read and write, with the
+	; exception of CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Timer (read) addresses
+TCPL_R		equ	$02		;Read Timer Capture register low byte
+TCPH_R		equ	$02		;Read Timer Capture register high byte
+TR2CML_R	equ	$02		;Read Timer R2 low byte
+TR2CMH_R	equ	$03		;Read Timer R2 high byte
+TR1CML_R	equ	$04		;Read Timer R1 low byte
+TR1CMH_R	equ	$05 		;Read Timer R1 high byte
+TCNTB_R		equ	$06		;Read Timer control register B
+TCNTA_R		equ	$07		;Read Timer control register A
+
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_R		equ	$0A		;Read MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_R		equ	$0B		;Read MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_R		equ	$0C		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_R		equ	$0D		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_R		equ	$0E		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_R		equ	$0F		;Read Port Direction
+
+; Timer (write) addresses
+TR2CML_W	equ	$12		;Write Timer R2 low byte
+TR2CMH_W	equ	$13		;Write Timer R2 high byte
+TR1CML_W	equ	$14		;Write Timer R1 low byte
+TR1CMH_W	equ	$15 		;Write Timer R1 high byte
+TCNTB_W		equ	$16		;Write Timer control register B
+TCNTA_W		equ	$17		;Write Timer control register A
+
+; Port setup (write) addresses
+WKED_W		equ	$1A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$1B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$1C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$1D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$1E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$1F		;Write Port Direction
+
+ELSE
+
+	;*********************************************************************************
+	; SX18AC/20AC/28AC Mode addresses
+	; *On SX18/20/28, all registers addressed via mode are write only, with the exception of
+	; CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_W		equ	$0A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$0B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$0C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$0D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$0E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$0F		;Write Port Direction
+ENDIF
+
+;*****************************************************************************************
+; Interrupt Service Routine
+;*****************************************************************************************
+; Note: The interrupt code must always originate at address $0.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; With a retiw value of -217 and an oscillator frequency of 50MHz, this
+; code runs every 4.34us.
+;*****************************************************************************************
+		org     $0
+interrupt					;3
+
+	;*********************************************************************************
+	; Virtual Peripheral: Pulse Frequency Modulation
+	;
+	; This outputs the current value of pfm0 to the PFM_pin.  This generates an analog
+	; voltage at PFM_pin after filtering.
+	;
+	;	Input variable(s): 
+	;	Output variable(s): 
+	;	Variable(s) affected: 
+	;	Flag(s) affected: 
+	;*********************************************************************************
+PFM_OUTPUT
+		_bank	PFM_bank
+		add	pfm0_acc,pfm0			;add the PWM output to the accumulator
+		snc				
+		jmp	:carry				;if there was no carry,  
+		clrb	PFM_pin				; then clear the PFM_pin
+		skip			 		; and exit
+:carry		setb	PFM_pin				; otherwise set the PFM_pin
+PFM_out
+
+	;*********************************************************************************
+	; Virtual Peripheral: DTMF Generation
+	;
+	; This outputs the current value of pfm0 to the PFM_pin.  This generates an analog
+	; voltage at PFM_pin after filtering.
+	;
+	;	Input variable(s): 
+	;	Output variable(s): 
+	;	Variable(s) affected: 
+	;	Flag(s) affected: 
+	;*********************************************************************************
+		jnb	dtmf_gen_en,sine_gen_out	;Exit if DTMF generation not enabled
+
+	  ;*******************************************************************************
+	  ; These routines (sine_generator1 and sine_generator2) generate a synthetic sine
+	  ; waves with values ranging from -32 to 32.  Frequency is specified by the counter.
+	  ; To set the frequency, put this value into the 16-bit freq_count register:
+	  ; freq_count = FREQUENCY * 6.83671552 (@50MHz)
+	  ;
+	  ; The routine sum_sines then summs the 2 sine frequencies and applies a DC offset.
+	  ; The Pulse Frequency Modulation VP then outputs the signal on the next pass of
+	  ; the ISR.
+	  ;*******************************************************************************
+sine_generator1
+		_bank	sin_gen_bank
+		add	freq_acc_low,freq_count_low;2	; advance sine at frequency
+		jnc	:no_carry		;2,4	; if lower byte rolls over
+		inc	freq_acc_high			; carry over to upper byte
+		jnz	:no_carry			; if carry causes roll-over
+		mov	freq_acc_high,freq_count_high	; then add freq counter to accumulator
+							; (which should be zero so move will work)
+		jmp	:change_sin			; and update sine wave
+:no_carry
+		add	freq_acc_high,freq_count_high	; add the upper bytes of the accumulators
+		jnc	:no_change
+:change_sin
+		mov	w,++sinvel			; if the sine wave
+		sb	curr_sin.7			; is positive, decelerate 
+		mov	w,--sinvel			; it.  Otherwise, accelerate it.
+		mov	sinvel,w		
+		add	curr_sin,w			; add the velocity to sin
+:no_change
+
+sine_generator2
+		add	freq_acc_low2,freq_count_low2;2	;advance sine at frequency
+		jnc	:no_carry		;2,4	; if lower byte rolls over
+		inc	freq_acc_high2			; carry over to upper byte
+		jnz	:no_carry			; if carry causes roll-over
+		mov	freq_acc_high2,freq_count_high2	; then add freq counter to accumulator
+							; (which should be zero so move will work)
+		jmp	:change_sin			; and update sine wave
+:no_carry
+		add	freq_acc_high2,freq_count_high2	; add the upper bytes of the accumulators
+		jnc	:no_change
+:change_sin
+		mov	w,++sinvel2	;1		; if the sine wave
+		sb	curr_sin2.7	;1		; is positive, decelerate it
+		mov	w,--sinvel2	;1		; it.  Otherwise, accelerate it.
+		mov	sinvel2,w	;1	
+		add	curr_sin2,w	;1		; add the velocity to sin
+:no_change
+
+sum_sines	mov	pfm0,curr_sin2			; mov sin2 into pfm0
+		mov	sin2_temp,w			; mov the high_frequency sin wave's current value
+		clc					; into a temporary register
+		snb	sin2_temp.7			; divide temporary register by four by shifting right
+		stc					; (for result = (0.25)(sin2))
+		rr	sin2_temp
+		clc
+		snb	sin2_temp.7
+		stc
+		mov	w,>>sin2_temp
+		add	pfm0,w				; (1.25)(sin2) = sin2 + (0.25)(sin2)
+		add	pfm0,curr_sin			; add the value of SIN into the PFM output
+							; for result = pfm0 = 1.25*sin2 + 1*sin
+		add	pfm0,#128			; put pfm0 in the middle of the output range (get rid of negative values)
+sine_gen_out
+
+	;*********************************************************************************
+	; Virtual Peripheral: 16-bit Timer
+	; The timer will tick at the interrupt rate (3.26us for 50MHz.)  To set up
+	; the timers, move in FFFFh - (value that corresponds to the time.)  Example:
+	; for 1ms = 1ms/3.26us = 306 dec = 132 hex so move in $FFFF - $0132 = $FECD
+	;
+	;	Input variable(s):
+	;		rx_pin - Pin which RS-232 is received on
+	;	Output variable(s):
+	;		rx_byte	- The byte received
+	;		rx_flag	- Set when a byte is received
+	;	Variable(s) affected:
+	;		rx_divide, rx_count, rx_byte
+	;	Flag(s) affected:
+	;	 	rx_flag
+	;*********************************************************************************
+timer		_bank	timers
+		inc	timer_low		;adjust timer's accumulator
+		snz
+		inc	timer_high		; (timer = 16 bits long)        
+		snz
+		setb	timer_flag
+
+:toggle_LED
+		sb	timer_high.6		;toggle timer (square wave)
+		clrb	led_pin
+		snb	timer_high.6
+		setb	led_pin
+:timer_out
+
+
+	;*********************************************************************************
+	; Set Interrupt Rate
+	;*********************************************************************************
+isr_end		mov	w,#-int_period		;refresh RTCC on return
+		retiw				;return from the interrupt
+						; = 1/(int_period*RTCC prescaler*1/50MHz)
+						; = 1/(163*1*20ns) = 3.26us
+;*****************************************************************************************
+; End of the Interrupt Service Routine
+;*****************************************************************************************
+
+;*****************************************************************************************
+; RESET VECTOR 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Program execution begins here on power-up or after a reset
+	;*********************************************************************************
+reset_entry		
+	;*********************************************************************************
+	; Initialise all port configuration
+	;*********************************************************************************
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_ST            	;Setup RD Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_ST            	;Setup RE Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_LVL            	;Setup RD CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rd,w		
+		mov     w,#RE_LVL            	;Setup RE CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!re,w		
+ENDIF
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_PLP            	;Setup RD Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_PLP            	;Setup RE Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+IFDEF SX48_52
+		mov	w,#RD_DDIR		;Setup RD Direction register, 0 = output, 1 = input
+		mov	!rd,w			
+		mov	w,#RE_DDIR		;Setup RE Direction register, 0 = output, 1 = input
+		mov	!re,w			
+ENDIF
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+IFDEF SX48_52
+		mov     w,#RD_latch         	;Initialize RD data latch
+		mov     rd,w			
+		mov     w,#RE_latch         	;Initialize RE data latch
+		mov     re,w			
+ENDIF
+
+
+	;*********************************************************************************
+	; Clear all Data RAM locations
+	;*********************************************************************************
+IFDEF SX48_52   				;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zero_ram	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+
+		_bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+ELSE     					;SX18/20/28 RAM clear routine
+		clr	fsr			;reset all ram banks
+:zero_ram	sb	fsr.4			;are we on low half of bank?
+		setb	fsr.3			;If so, don't touch regs 0-7
+		clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+ENDIF
+	;*********************************************************************************
+	; Initialize program/VP registers
+	;*********************************************************************************
+		_bank	sin_gen_bank			; Program starts here on power up
+
+;		mov	curr_sin,#32			; init variables.  A sine starts at 1, a cos wave starts at 0. 
+;		mov	sinvel,#0
+		mov	curr_sin,#-4			; use these values for a wave which is 90 degrees out of phase.
+		mov	sinvel,#-8
+		mov	curr_sin2,#-4			; use these values for a wave which is 90 degrees out of phase.
+		mov	sinvel2,#-8
+		call	@disable_output
+
+	;*********************************************************************************
+	; Setup and enable RTCC interrupt, WREG register, RTCC/WDT prescaler
+	;*********************************************************************************
+
+RTCC_ON		=	%10000000	;Enables RTCC at address $01 (RTW hi)
+					;*WREG at address $01 (RTW lo) by default
+RTCC_ID		=	%01000000	;Disables RTCC edge interrupt (RTE_IE hi)
+					;*RTCC edge interrupt (RTE_IE lo) enabled by default
+RTCC_INC_EXT	=	%00100000	;Sets RTCC increment on RTCC pin transition (RTS hi)
+					;*RTCC increment on internal instruction (RTS lo) is defalut
+RTCC_FE		=	%00010000	;Sets RTCC to increment on falling edge (RTE_ES hi)
+					;*RTCC to increment on rising edge (RTE_ES lo) is default
+RTCC_PS_ON	=	%00000000	;Assigns prescaler to RTCC (PSA lo)
+RTCC_PS_OFF	=	%00001000	;Assigns prescaler to RTCC (PSA lo)
+PS_000		=	%00000000	;RTCC = 1:2, WDT = 1:1
+PS_001		=	%00000001	;RTCC = 1:4, WDT = 1:2
+PS_010		=	%00000010	;RTCC = 1:8, WDT = 1:4
+PS_011		=	%00000011	;RTCC = 1:16, WDT = 1:8
+PS_100		=	%00000100	;RTCC = 1:32, WDT = 1:16
+PS_101		=	%00000101	;RTCC = 1:64, WDT = 1:32
+PS_110		=	%00000110	;RTCC = 1:128, WDT = 1:64
+PS_111		=	%00000111	;RTCC = 1:256, WDT = 1:128
+
+		mov	w,#RTCC_ON | RTCC_FE | RTCC_PS_OFF	;setup option register
+		mov	!option,w
+		jmp	@main
+
+
+;*****************************************************************************************
+; MAIN PROGRAM CODE 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Main
+	;******************************************************************
+main		
+	;*********************************************************************************
+	; Send DTMF dial string
+	;******************************************************************
+:dial_string	_bank	dialer_bank
+ 		mov	string,#_dial_string	;store string address
+:loop        	mov	w,string		;read next string character
+		mov	m,#4			; with indirect addressing
+		iread				; using the mode register
+		test	w			;are we at the last char?
+		snz				;if not=0, skip ahead
+		jmp	:dial_done		;yes, we're done
+		mov	byte,w
+		setb	dtmf_gen_en
+		call	@digit_2_index		; convert the ascii digit to an 
+						; index value
+		call	@load_frequencies	; load the frequency registers
+		call	@dial_it		; dial the number for 100ms and return.
+		inc	string			;point to next character
+		jmp	:loop			;loop until done
+:dial_done
+		jmp	$			;halt
+
+;*****************************************************************************************
+; END OF MAIN PROGRAM CODE 
+;*****************************************************************************************
+
+org	$200			; Start this code on page 1
+;*****************************************************************************************
+; Subroutines
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Function: delay_10n_ms
+	; This subroutine delays 'w'*10 milliseconds. 
+	; 
+	; Inputs:
+	;	w - # of milliseconds to delay for.
+	; Outputs:
+	; 	none
+	; Registers affected:
+	;	temp, timer_high, timer_low, timer_flag
+	; Functions Called:
+	;       none
+	;*********************************************************************************
+delay_10n_ms	mov	temp,w
+		_bank	timers
+:loop		clrb	timer_flag	; This loop delays for 10ms
+		mov	timer_high,#$0f4
+		mov	timer_low,#$004
+		jnb	timer_flag,$
+		dec	temp		; do it w-1 times.
+		jnz	:loop	
+		clrb	timer_flag
+		retp
+
+	;*********************************************************************************
+	; Function: disable_output
+	; Disables the outputs. Loads DC value into PFM and disables the output switch.
+	;
+	; Inputs:
+	;	none
+	; Outputs:
+	; 	none
+	; Registers affected:
+	;	pfm0
+	; Functions Called:
+	;       none
+	;*********************************************************************************
+disable_output	_bank	PFM_bank
+		mov	pfm0,#00	; put 2.5V DC on PFM output pin
+		clrb	dtmf_gen_en
+		retp
+
+org	$400			; This table is on page 2.
+;*****************************************************************************************
+; String data (for RS-232 output) and tables
+;*****************************************************************************************
+_dial_string	dw	'327-8888',0
+_0_		dw	f941_h,f941_l,f1336_h,f1336_l
+_1_		dw	f697_h,f697_l,f1209_h,f1209_l
+_2_		dw	f697_h,f697_l,f1336_h,f1336_l
+_3_		dw	f697_h,f697_l,f1477_h,f1477_l
+_4_		dw	f770_h,f770_l,f1209_h,f1209_l
+_5_		dw	f770_h,f770_l,f1336_h,f1336_l
+_6_		dw	f770_h,f770_l,f1477_h,f1477_l
+_7_		dw	f852_h,f852_l,f1209_h,f1209_l
+_8_		dw	f852_h,f852_l,f1336_h,f1336_l
+_9_		dw	f852_h,f852_l,f1477_h,f1477_l
+_star_		dw	f941_h,f941_l,f1209_h,f1209_l
+_pound_		dw	f941_h,f941_l,f1477_h,f1477_l
+
+
+org	$600			; These subroutines are on page 3.
+;*****************************************************************************************
+; DTMF transmit functions/subroutines
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Function: digit_2_index
+	; This subroutine converts a digit from 0-9 or a '*' or a '#' to a table lookup
+	; index which can be used by the load_frequencies subroutine.  To use this routine,
+	; pass it a value in the 'byte' register.  No invalid digits are used (A, B, C, or D).
+	;
+	; Inputs:
+	;	byte
+	; Outputs:
+	; 	byte - returns with ascii byte or $FF if an error has occured
+	; Registers affected:
+	;	byte
+	; Functions Called:
+	;       none
+	;*********************************************************************************
+digit_2_index	_bank	dialer_bank
+		cja	byte,#'9',:error		; if the character is above 9, then error (get another char)
+		cje	byte,#'*',:star
+		cje	byte,#'#',:pound
+		cjb	byte,#'0',:error
+		sub	byte,#'0'			; convert to decimal number
+		jmp	:got_it
+:star		mov	byte,#10
+		jmp	:got_it
+:pound		mov	byte,#11
+		
+:got_it		retp
+:error
+		mov	byte,#$0FF
+		retp
+
+	;*********************************************************************************
+	; Function: load_frequencies
+	; This subroutine loads the frequencies using a table lookup approach. The index
+	; into the table is passed in the byte register.  The DTMF table must be in the
+	; range of $400 to $500.
+	;
+	; Inputs:
+	;	byte
+	; Outputs:
+	; 	byte - returns with index into DTMF frequency constant lookup table
+	; Registers affected:
+	;	byte, temp, fsr
+	; Functions Called:
+	;       none
+	;*********************************************************************************
+load_frequencies
+		_bank	dialer_bank
+		cje	byte,#$0FF,:end_load_it
+		clc
+		rl	byte
+		rl	byte				; multiply byte by 4 to get offset
+		add	byte,#_0_			; add in the offset of the first digit
+		mov	temp,#4
+		mov	fsr,#freq_count_high
+		_bank	dialer_bank
+
+:dtmf_load_loop	mov	m,#4				; mov 4 to m (table is in $400)
+		mov	w,byte
+		IREAD					; get the value from the table
+		_bank	sin_gen_bank			; and load it into the frequency 
+		mov	indf,w				; register
+		_bank	dialer_bank
+		inc	byte
+		inc	fsr
+		decsz	temp
+		jmp	:dtmf_load_loop			; when all 4 values have been loaded,
+:end_load_it	retp					; return
+
+	;*********************************************************************************
+	; Function: 
+	; This subroutine puts out whatever frequencies were loaded for 100ms, and then
+	; stops outputting the frequencies.
+	;
+	; Inputs:
+	;	byte
+	; Outputs:
+	; 	byte - returns with index into DTMF frequency constant lookup table
+	; Registers affected:
+	;	byte, curr_sin, curr_sin2, sinvel, sinvel2
+	; Functions Called:
+	;       delay_10n_ms, disable_output
+	;*********************************************************************************
+dial_it		_bank	dialer_bank
+		cje	byte,#$0FF,:dial_it_done
+		_bank	sin_gen_bank
+		mov	curr_sin,#-4		; use these values to start the wave at close to zero crossing.
+		mov	sinvel,#-8
+		mov	curr_sin2,#-4		; use these values to start the wave at close to zero crossing.
+		mov	sinvel2,#-8
+		mov	w,#3
+		call	@delay_10n_ms		; delay 30ms
+		mov	w,#10
+		call	@delay_10n_ms		; delay 100ms
+		clrb	dtmf_gen_en
+		call	@disable_output
+:dial_it_done	retp
+
+
+;******************************************************************************
+; END OF PROGRAM FOR DTMF GENERATION.
+;******************************************************************************
+;        Copyright © 1999 Scenix Semiconductor, Inc. All rights
+;        reserved.
+;        
+;        Scenix Semiconductor, Inc. assumes no responsibility or liability for
+;        the use of this [product, application, software, any of these products].
+;        
+;        Scenix Semiconductor conveys no license, implicitly or otherwise, under
+;        any intellectual property rights.
+;        Information contained in this publication regarding (e.g.: application,
+;        implementation) and the like is intended through suggestion only and may
+;        be superseded by updates. Scenix Semiconductor makes no representation
+;        or warranties with respect to the accuracy or use of these information,
+;        or infringement of patents arising from such use or otherwise.
+;        
+;        Scenix Semiconductor products are not authorized for use in life support
+;        systems or under conditions where failure of the product would endanger
+;        the life or safety of the user, except when prior written approval is
+;        obtained from Scenix Semiconductor.
+;******************************************************************************

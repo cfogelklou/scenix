@@ -1,0 +1,851 @@
+PayloadInfoSeg		MACRO
+;********************************************************************************
+;  PAYLOAD LAYER
+;********************************************************************************
+;
+;Framing Layer Events
+;
+;	fl2plRxData(w=Data)				;Data byte from frame
+;	fl2plRxValid()					;Payload data is complete and valid
+;	fl2plRxError()					;Payload data contains errors
+;	pl2flRxIgnore() call				;Tell framing layer to ignore the current frame
+;
+;	pl2flTxStart()					;Request framing layer to start a frame
+;	fl2plTxData(var w=Data var z=Last) call		;Request for data from framing layer - Z flag is set if its the last byte
+;	fl2plTxComplete()				;Transmission is complete
+;
+;LAP Layer Events
+;
+;	pl2lapRxFrame(w=Type)				;Incomming frame of given type
+;	pl2lapRxValid()					;Frame was valid
+;	pl2lapRxError()					;Frame was invalid
+;	pl2lapRxXIDData(w=Data)				;Pass XID data to lap layer
+;	pl2lapRxIData(w=Data)				;Pass I data to lap layer
+;	pl2lapRxUIData(w=Data)				;Pass I data to lap layer
+;	lap2plRxIgnore()				;LAP layer has requested that the frame should be ignored
+;
+;	lap2plSNRMAccept()				;Accept connection and send reply
+;	lap2plTxXIDCmd(w=Slot)				;Send a XID command frame
+;	lap2plTxXIDRsp()				;Send a XID response frame
+;	lap2plTxSimpleRsp(w=Command)			;Send simple response frame
+;	lap2plTxIRsp(w=Command)				;Send an I frame
+;	pl2lapTxIData(ret w=Data ret z=Last) call	;Request for data
+;	pl2lapTxComplete()				;Complete indication
+;
+;	lap2plGenerateNewAddr				;Request that a new 32-bit address be generated
+;
+;********************************************************************************
+			ENDM
+
+
+PayloadDataSeg		MACRO
+;********************************************************************************
+;  PAYLOAD LAYER
+;********************************************************************************
+
+		org	$50
+
+plBank		= 	$50			;16 bytes used - Bank not shared
+
+plState		ds	1			;Current state
+plData		ds	1			;Incomming byte of payload data
+plFrameType	ds	1			;The frame type for shared code / passed to lap layer
+plCommand	ds	1
+plPosition	ds	1			;Current position for multibyte states
+plConnAddr	ds	1			;Connection address (must be FF if not connected)
+plSelfAddr	ds	4			;Own 4 byte address
+plDestAddr	ds	4			;Dest 4 byte address
+plInfo		ds	2			;Frame specific information
+
+plTxAddressByte	=	plData			;Address to be transmitted
+plTxPostCommand	=	plPosition
+
+plIDataDLSAP	=	plInfo+0		;DLSAP byte from/for a I Data frame
+plIDataSLSAP	=	plInfo+1		;SLSAP byte from/for a I Data frame
+plXIDSlot	=	plInfo+0		;Slot number from/for a XID frame
+plXIDFlags	=	plInfo+1		;Discovery Flags from/for a XID frame
+plSNRMConnAddr	=	plInfo+0		;Connection Address of SNRM frame
+plSNRMBaudRate	=	plInfo+1		;Baudrate parameter from SNRM frame
+
+iFrame		= 1
+sRRFrame	= 2
+sRNRFrame	= 3
+sREJFrame	= 4
+sSREJFrame	= 5
+uUIFrame	= 6				;UICmd or UIRsp (same command)
+uDISCFrame	= 7				;DISCCmd or RDRsp (same command)
+uUARspFrame	= 8				;UARsp
+uNRMFrame	= 9				;SNRMCmd or RNRMRsp (same command)
+uTESTFrame	= 10				;TESTCmd or TESTRsp (same command)
+uFRMRRspFrame	= 11				;FRMRRsp
+uDMRspFrame	= 12				;DMRsp
+uXIDCmdFrame	= 13				;XIDCmd
+uXIDRspFrame	= 14				;XIDRsp
+
+sRR		= %00010001			;%xxx10001
+sRNR		= %00010101			;%xxx10101
+sREJ		= %00011001			;%xxx11001
+sSREJ		= %00011101			;%xxx11101
+
+uSNRMCmd	= %10010011
+uDISCCmd	= %01010011
+uUICmd		= %00010011
+uXIDCmd		= %00111111
+uTESTCmd	= %11110011
+uRNRMRsp	= %10010011
+uUARsp		= %01110011
+uFRMRRsp	= %10010111
+uDMRsp		= %00011111
+uRDRsp		= %01010011
+uUIRsp		= %00010011
+uXIDRsp		= %10111111
+uTESTRsp	= %11110011
+
+plRxState	= %00000000
+plTxState	= %10000000
+
+plRxCommandState	=  1 + plRxState	;
+plRxDataIgnoreState	=  2 + plRxState
+plRxIDataState		=  3 + plRxState	;RxI
+plRxUIDataState		=  4 + plRxState	;RxUI
+plRxXIDFormatState	=  5 + plRxState	;RxXID
+plRxXIDSourceState	=  6 + plRxState	;RxXID
+plRxXIDDestState	=  7 + plRxState	;RxXID
+plRxXIDFlagsState	=  8 + plRxState	;RxXID
+plRxXIDSlotState	=  9 + plRxState	;RxXID
+plRxXIDVersionState	= 10 + plRxState	;RxXID
+plRxXIDInfoState	= 11 + plRxState	;RxXID
+plRxSNRMSourceState	= 12 + plRxState	;RxSNRM
+plRxSNRMDestState	= 13 + plRxState	;RxSNRM
+plRxSNRMAddrState	= 14 + plRxState	;RxSNRM
+plRxSNRMParamTypeState	= 15 + plRxState	;RxSNRM
+plRxSNRMParamSizeState	= 16 + plRxState	;RxSNRM
+plRxSNRMParamDataState	= 17 + plRxState	;RxSNRM
+
+plTxCompleteState	=  1 + plTxState	;Waiting for Complete indication from framing Layer
+plTxAddressState	=  2 + plTxState	;
+plTxCommandState	=  3 + plTxState	;
+plTxIDataDLSAPState	=  4 + plTxState	;
+plTxIDataSLSAPState	=  5 + plTxState	;
+plTxIDataDataState	=  6 + plTxState	;
+plTxUIDataState		=  7 + plTxState	;
+plTxXIDFormatState	=  8 + plTxState	;
+plTxXIDSourceState	=  9 + plTxState	;
+plTxXIDDestState	= 10 + plTxState	;
+plTxXIDFlagsState	= 11 + plTxState	;
+plTxXIDSlotState	= 12 + plTxState	;
+plTxXIDVersionState	= 13 + plTxState	;
+plTxXIDFooterState	= 14 + plTxState	;
+plTxUASourceState	= 15 + plTxState	;
+plTxUADestState		= 16 + plTxState	;
+plTxUABaudRateState	= 17 + plTxState	;
+plTxUAParamState	= 18 + plTxState	;
+
+;********************************************************************************
+			ENDM
+
+
+PayloadCodeSeg		MACRO
+;********************************************************************************
+;  PAYLOAD LAYER
+;********************************************************************************
+
+;********** a2plReset **********
+
+a2plReset
+	bank	plBank
+	clr	plState				;Reset to idle state
+	mov	plConnAddr,#$FF			;Not connected => address must be $FF
+	retp
+
+;********** fl2plRxData **********
+
+fl2plRxData
+	bank	plBank
+	snb	plState.7			;Check that it is a RxState
+	retp					;Tx state => return
+	mov	plData, w			;Store incomming byte
+	debug	PayloadDataRx			;Debug: Pass payload byte received
+	mov	w, plState			;Jump based on state
+	jmp	PC+w
+	jmp	plRxIdle			; 0 = plIdleState
+	jmp	plRxCommand			; 1 = plRxCommandState
+	retp					; 2 = plRxDataIgnoreState
+	jmp	plRxIData			; 3 = plRxIDataState
+	jmp	plRxUIData			; 4 = plRxUIDataState
+	jmp	plRxXIDFormat			; 5 = plRxXIDFormatState
+	jmp	plRxXIDSource			; 6 = plRxXIDSourceState
+	jmp	plRxXIDDest			; 7 = plRxXIDDestState
+	jmp	plRxXIDFlags			; 8 = plRxXIDFlagsState
+	jmp	plRxXIDSlot			; 9 = plRxXIDSlotState
+	jmp	plRxXIDVersion			;10 = plRxXIDVersionState
+	jmp	plRxXIDInfo			;11 = plRxXIDInfoState
+	jmp	plRxSNRMSource			;12 = plRxSNRMSourceState
+	jmp	plRxSNRMDest			;13 = plRxSNRMDestState
+	jmp	plRxSNRMAddr			;14 = plRxSNRMAddrState
+	jmp	plRxSNRMParamType		;15 = plRxSNRMParamTypeState
+	jmp	plRxSNRMParamSize		;16 = plRxSNRMParamSizeState
+	jmp	plRxSNRMParamData		;17 = plRxSNRMParamDataState
+
+;********** fl2plTxData **********
+
+fl2plTxData
+	bank	plBank
+	sb	plState.7			;Check that it is a TxState
+	retp					;Rx state => return
+	mov	w, plState			;Jump based on state
+	and	w, #%01111111			;Remove Tx state flag
+	jmp	PC+w
+	retp					; 0 = Invalid state
+	retp					; 1 = plTxCompleteState (Cannot receive TxData in this state)
+	jmp	plTxAddress			; 2 = plTxAddressState
+	jmp	plTxCommand			; 3 = plTxCommandState
+	jmp	plTxIDataDLSAP			; 4 = plTxIDataDLSAPState
+	jmp	plTxIDataSLSAP			; 5 = plTxIDataSLSAPState
+	jmp	plTxIDataData			; 6 = plTxIDataDataState
+	jmp	plTxUIData			; 7 = plTxUIDataState
+	jmp	plTxXIDFormat			; 8 = plTxXIDFormatState
+	jmp	plTxXIDSource			; 9 = plTxXIDSourceState
+	jmp	plTxXIDDest			;10 = plTxXIDDestState
+	jmp	plTxXIDFlags			;11 = plTxXIDFlagsState
+	jmp	plTxXIDSlot			;12 = plTxXIDSlotState
+	jmp	plTxXIDVersion			;13 = plTxXIDVersionState
+	jmp	plTxXIDFooter			;14 = plTxXIDFooterState
+	jmp	plTxUASource			;15 = plTxUASourceState
+	jmp	plTxUADest			;16 = plTxUADestState
+	jmp	plTxUABaudRate			;17 = plTxUABaudRateState
+	jmp	plTxUAParam			;18 = plTxUAParamState
+
+;********** fl2plTxComplete **********
+
+fl2plTxComplete
+	bank	plBank
+	clr	plState					;return to idle state
+	debugl	PayloadDataTx, '^'			;Debug: Payload data complete indication
+	pjmp	pl2lapTxComplete			;Indicate complete to lap layer (pl2lapTxComplete will issue ret instrustion)
+
+;********** lap2plTxUICmd **********
+
+lap2plTxUICmd	jmp	plTxUICmd
+
+;********************************************************************************
+;  PAYLOAD LAYER - Internal Subroutines
+;********************************************************************************
+
+plRxDecodeSCmd						;WARNING - does not set pa bits when ret => must be callled form same half page
+	mov	Temp, w					;Command: check bits %....nn..
+	rr	Temp					;Shift command right 1
+	mov	w, >>Temp				;Shift command right 1 and into w
+	and	w, #%00000011				;Mask out unwanted bits
+	jmp	PC+w					;jump based on w
+	retw	sRRFrame				;....00.. = RR
+	retw	sRNRFrame				;....01.. = RNR
+	retw	sREJFrame				;....10.. = REJ
+	retw	sSREJFrame				;....11.. = SREJ
+
+plRxDecodeUNextState				;WARNING - does not set pa bits when ret => must be callled form same half page
+	mov	Temp, w				;FrameType
+	mov	w, #uUIFrame			;lowest FrameType constant for a U frame
+	sub	Temp, w				;subtract lowest valid number so uUIFrame is now 0
+	mov	w, Temp
+	jmp	PC+w
+	retw	plRxUIDataState			;uUIFrame	=	6	;UICmd or UIRsp (same command)
+	retw	plRxDataIgnoreState		;uDISCFrame	=	7	;DISCCmd or RDRsp (same command)
+	retw	plRxDataIgnoreState		;uUARspFrame	=	8	;UARsp
+	retw	plRxSNRMSourceState		;uNRMFrame	=	9	;SNRMCmd or RNRMRsp (same command)
+	retw	plRxDataIgnoreState		;uTESTFrame	=	10	;TESTCmd or TESTRsp (same command)
+	retw	plRxDataIgnoreState		;uFRMRRspFrame	=	11	;FRMRRsp
+	retw	plRxDataIgnoreState		;uDMRspFrame	=	12	;DMRsp
+	retw	plRxXIDFormatState		;uXIDCmdFrame	=	13	;XIDCmd
+	retw	plRxXIDFormatState		;uXIDRspFrame	=	14	;XIDRsp
+
+lap2plGenerateNewAddr				;Note: code is synchronous with the ISR therfore RTCC and Timer registers are not random numbers
+	bank	TimerBank
+	mov	w, Random			;Random number
+	bank	plBank
+	mov	plSelfAddr+0, w			;Byte 0 = Random number
+	mov	FSR, w
+	mov	w, INDF
+	bank	plBank
+	mov	plSelfAddr+1, w			;Byte 1 = contents of the register pointer to by the Random number
+	mov	m, w				;m = byte 1 number (semi random)
+	mov	w, plSelfAddr+0			;w = byte 0 number (fully random)
+	iread					;read ROM and address given by w and m
+	mov	plSelfAddr+2, w			;Byte 2 = low contents of ROM pointed to by byte1:byte0
+	mov	w, m				;w = m = high 4 bits of ROM contents
+	mov	plSelfAddr+3, w			;Byte 3 = high contents of ROM pointed to by byte1:byte0
+	retp
+
+;********************************************************************************
+;  PAYLOAD LAYER - Receive
+;********************************************************************************
+
+;********** fl2plRxValid **********
+
+fl2plRxValid
+	clrb	ledERR				;Turn ERR led off
+	debugl	PayloadDataRx, '^'		;Debug: Indicate complete
+	bank	plBank
+	clr	plState				;Return to idle state
+	pjmp	pl2lapRxValid			;Inform lap layer that frame was valid (lap layer will issue ret instruction)
+
+
+;********** fl2plRxError **********
+
+fl2plRxError
+	setb	ledERR				;Turn ERR led on
+	debugl	PayloadDataRx, '!'		;Debug: Indicate error
+	bank	plBank
+	clr	plState				;Return to idle state
+	pjmp	pl2lapRxError			;Inform lap layer that frame was invalid (lap layer will issue ret instruction)
+
+;********** lap2plRxIgnore **********
+
+lap2plRxIgnore					;Ignore the current incomming frame
+	bank	plBank
+plRxIgnore
+	clr	plState				;Return to idle state
+	pjmp	pl2flRxIgnore
+plRxInvalid
+	clr	plState				;Return to idle state
+	pcall	pl2flRxIgnore
+	pjmp	pl2lapRxError			;Inform lap layer of error
+
+;********************************************************************************
+;  PAYLOAD LAYER - RxData General
+;********************************************************************************
+
+plRxStoreSource
+	mov	w, #plDestAddr				;pointer to DestAddress variable
+	add	w, plPosition				;add offset
+	mov	FSR, w					;Now can indirectly access
+	mov	INDF, plData				;Store byte into SourceAddr
+	inc	plPosition				;Move offset ready for next byte of SourceAddr
+	cse	plPosition, #4				;Have 4 bytes been received ?
+	retp						;No  => remain in this state waiting for next byte
+	inc	plState					;Yes => end of Source. Change to next state
+	clr	plPosition
+	retp
+
+plRxTestDest						;WARNING : will pass FF bytes in specific address (ie bytewise checking, not FFFFFFFF checking)
+	csne	plData, #$FF				;Broadcast address ?
+	jmp	:Cont					;Yes => Contiue
+	mov	w, #plSelfAddr				;pointer to SelfAddress variable
+	add	w, plPosition				;add offset
+	mov	FSR, w					;Now can indirectly access
+	cse	plData, INDF				;Self Address ?
+	jmp	plRxInvalid				;No  => Ignore frame, Inform lap layer of error, and return to idle
+:Cont	inc	plPosition				;Move offset ready for next byte of DestAddr
+	cse	plPosition, #4				;Have 4 bytes been received ?
+	retp						;No  => remain in this state waiting for next byte
+	inc	plState					;Yes => end of DestAddr. Change to next state
+	clr	plPosition
+	retp
+
+;********************************************************************************
+;  PAYLOAD LAYER - RxData
+;********************************************************************************
+
+;********** fl2plRxData - Idle State **********
+
+plRxIdle						;First byte = address
+	mov	w, plData				;Received Address
+	xor	w, plConnAddr				;Compare with interested address
+	sz						;Valid address ?
+	jmp	plRxIgnore				;No  => ignore
+	mov	plState, #plRxCommandState		;Yes => next will receive command byte
+	retp
+
+;********** fl2plRxData - RxCommand State **********
+
+plRxCommand
+	mov	plCommand, plData			;Store command
+	sb	plCommand.4				;Is the P/F bit set ?
+	jmp	plRxIgnore				;No => Ignore frame (IrDA lite spec p10 and p16) and return to idle state
+	sb	plCommand.0				;Is this an I frame ? (%.......0)
+	jmp	plRxICommand				;Yes => process
+	sb	plCommand.1				;No  => must be S or U frame. Is this a S frame ?
+	jmp	plRxSCommand				;Yes (%......01) => process S frame 
+	jmp	plRxUCommand				;No  (%......11) => process U frame
+
+plRxICommand
+	debugl	PayloadInfo, 'I'
+	mov	plState, #plRxIDataState		;Next should be data
+	mov	plFrameType, #iFrame			;store frame type and w will also be passed to lap layer
+	pjmp	pl2lapRxFrame				;pass message (lap layer will issue ret instruction)
+
+plRxSCommand
+	debugl	PayloadInfo, 'S'
+	mov	plState, #plRxDataIgnoreState		;Next should be complete indication (ie no data) but need waiting state
+	mov	w, plCommand
+	call	plRxDecodeSCmd				;pass w = plRxData, returns w for plFrameType
+	mov	plFrameType, w				;store frame type and w will also be passed to lap layer
+	pjmp	pl2lapRxFrame				;pass message (lap layer will issue ret instruction)
+
+plRxUCommand
+	debugl	PayloadInfo, 'U'
+	mov	plPosition, #_plUCommands		;plPosition = 1st byte of data
+:Loop	mov	m, #_plUCommands / 256			;m = Pointer to string (high)
+	mov	w, plPosition				;w = Pointer to string (low)
+	inc	plPosition				;Increment offset for next byte
+	iread						;Read data byte from ROM
+	xor	w, plCommand				;is the byte the same as the received command ?
+	jz	:Found					;Yes => must be valid
+	mov	w, m					;No  => try again. Move high part of data to w
+	test	w					;Is this the last byte ?
+	jz	:Loop					;No  => try again
+	jmp	plRxIgnore				;Yes => Invalid command => ignore and return to idle state
+:Found	mov	plFrameType, plPosition			;plFrameType = position
+	mov	w, #_plUCommands + 1			;w = starting offset
+	sub	plFrameType, w				;remove offset => FrameType 0 for a uUIFrame
+	mov	w, #uUIFrame				;constant of first type of U command (uUIFrame = 6)
+	add	plFrameType, w				;FrameType is now correct
+	mov	w, plFrameType				;pass FrameType in w
+	call	plRxDecodeUNextState			;Returns w = next state
+	mov	plState, w				;Store state
+	clr	plPosition				;Clear position for following states
+	mov	w, plFrameType				;pass frame type to lap layer
+	pjmp	pl2lapRxFrame				;pass message (lap layer will issue ret instruction)
+
+;********************************************************************************
+;  PAYLOAD LAYER - Receiving I Frame
+;********************************************************************************
+
+;********** fl2plRxData - RxIData State **********
+
+plRxIData
+	mov	w, plData				;Data to pass
+	debug	IFrameDataRx				;Show debug info
+	pjmp	pl2lapRxIData				;Pass data to lmp layer (via lap layer)
+
+;********************************************************************************
+;  PAYLOAD LAYER - Receiving UI Frame
+;********************************************************************************
+
+;********** fl2plRxData - RxUIData State **********
+
+plRxUIData
+	mov	w, plData				;Data to pass
+	pjmp	pl2lapRxUIData				;Pass data to app layer (via lap layer)
+
+;********************************************************************************
+;  PAYLOAD LAYER - Receiving XID Frame
+;********************************************************************************
+
+;********** fl2plRxData - RxXIDFormat State **********
+
+plRxXIDFormat
+	cse	plData, #1				;Format must be 1
+	jmp	plRxInvalid				;No  => Ignore frame, inform lap layer, and return to idle state
+	inc	plState					;Next 4 bytes will be the source address => Enter plRxXIDSourceState
+	clr	plPosition				;Byte 0 of the source address
+	retp
+
+;********** fl2plRxData - RxXIDSource State **********
+
+plRxXIDSource	=	plRxStoreSource				;Store byte in DestAddr
+
+;********** fl2plRxData - RxXIDDest State **********
+
+plRxXIDDest	=	plRxTestDest				;Compare 4 bytes with SelfAddr (mismatch of not FFFFFFFF will change to ignore state)
+
+;********** fl2plRxData - RxXIDFlags State **********
+
+plRxXIDFlags
+	mov	plXIDFlags, plData			;Store the flags for the response
+	inc	plState					;Next will receive the slot number (plRxXIDSlotState)
+	retp
+
+;********** fl2plRxData - RxXIDSlot State **********
+
+plRxXIDSlot
+	mov	plXIDSlot, plData			;Store the slot number
+	inc	plState					;plRxXIDVersionState
+	retp
+
+;********** fl2plRxData - RxXIDVersion State **********
+
+plRxXIDVersion
+	test	plData					;Is version = 0 ?
+	jnz	plRxInvalid				;No  => Ignore frame, inform lap layer, and return to idle state
+	inc	plState					;Next bytes will be the Descovery Info if any (plRxXIDInfoState)
+	clr	plPosition				;Clear position for next state
+	retp
+
+;********** fl2plRxData - RxXIDInfo State **********
+
+plRxXIDInfo
+	mov	w, plData				;Get data byte
+	pjmp	pl2lapRxXIDData				;Pass data to lap layer
+
+;********************************************************************************
+;  PAYLOAD LAYER - Receiving SNRM Frame
+;********************************************************************************
+
+;********** fl2plRxData - RxSNRMSource State **********
+
+plRxSNRMSource	=	plRxStoreSource
+
+;********** fl2plRxData - RxSNRMDest State **********
+
+plRxSNRMDest	=	plRxTestDest
+
+;********** fl2plRxData - RxSNRMAddr State **********
+
+plRxSNRMAddr
+	mov	plSNRMConnAddr, plData			;Store ConnAddr (only apply if frame is validated)
+	mov	plSNRMBaudRate, #%00000010		;If no baud rate received then default to 9600 (bit 1 indicates 9600)
+	inc	plState					;#plRxSNRMParamTypeState - Next bytes are the negioation parameters
+	retp
+
+;********** fl2plRxData - RxSNRMParam State **********
+
+plRxSNRMParamType
+	inc	plState					;#plRxSNRMParamSizeState - Next byte will state how many bytes of data
+	csne	plData, #$01				;Receiving type $01 = baud rate ?
+	setb	plSNRMBaudRate.0			;Yes => Set flag to indicate receiving baud rate (bit 0 is normally used to indicate 2400 which we do not support thus will be removed later)
+	retp						;No  => continue
+
+plRxSNRMParamSize
+	mov	plPosition, plData			;RxData states how many bytes of data
+	inc	plState					;#plRxSNRMParamDataState - Next bytes will be the param data
+	retp
+
+plRxSNRMParamData
+	decsz	plPosition				;Decrement counter; Zero ?
+	jmp	:More					;No  => wait for more
+	mov	plState, #plRxSNRMParamTypeState	;Yes => Next byte will be another parameter
+:More	sb	plSNRMBaudRate.0			;Is this byte the first byte of the baud rate parameter
+	retp						;No => ignore
+	mov	w, plData				;Get baud rate parameter
+	and	w, #%00111110				;And with our supported baud rates = 9600(bit 1), 19200(bit 2), 38400(bit 3) 57600(bit 4) 115200(bit 5)
+	mov	plSNRMBaudRate, w			;Store in SNRMBaudRate (note bit 0 is now clear => will correctly ignore next byte of parameter if it is a 2 byte parameter)
+	setb	plSNRMBaudRate.1			;Force 9600 to be valid
+	retp
+
+;********************************************************************************
+;  PAYLOAD LAYER - Tx
+;********************************************************************************
+
+plTxFooter						;w = Addr, m = Addr / 256
+	add	w, plPosition				;Add offset
+	inc	plPosition				;Increment offset for next byte
+	iread
+	mov	Temp, w					;Store data
+	mov	w, m					;Move high part of data to w
+	test	w					;Is this the last byte ?
+	jnz	:Last					;Yes => Jump
+	mov	w, Temp					;Data byte to be transmitted
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+:Last	mov	plState, #plTxCompleteState		;Last byte => change to complete state
+	mov	w, Temp					;Data byte to be transmitted
+	stz						;Indicate complete
+	retp						;Return data to framing layer
+
+plTxSelfAddr
+	mov	w, #plSelfAddr				;pointer to SelfAddress variable
+	add	w, plPosition				;add offset
+	mov	FSR, w					;Now can indirectly access
+	inc	plPosition				;Move offset ready for next byte of SourceAddr
+	cse	plPosition, #4				;Sent all 4 bytes ?
+	jmp	:Send					;No  => Send current byte (stay in this state)
+	inc	plState					;Yes => Send current byte (next state)
+	clr	plPosition
+:Send	mov	w, INDF					;Byte of Source Address
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+
+plTxDestAddr
+	mov	w, #plDestAddr				;pointer to recorded DestAddress variable
+	add	w, plPosition				;add offset
+	mov	FSR, w					;Now can indirectly access
+	inc	plPosition				;Move offset ready for next byte
+	cse	plPosition, #4				;Sent all 4 bytes ?
+	jmp	:Send					;No  => Send current byte (stay in this state)
+	inc	plState					;Yes => Send current byte (Next will send Discovery flags)
+	clr	plPosition
+:Send	mov	w, INDF					;Byte of Source Address
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+
+;********************************************************************************
+
+plTxCmdStart
+	mov	plState, #plTxAddressState		;First byte = address
+	mov	plTxAddressByte, plConnAddr		;Address = ConnAddr
+	setb	plTxAddressByte.0			;Indicate Cmd frame
+	pjmp	pl2flTxFrame				;Ask to framing layer to start a new frame
+
+plTxRspStart
+	mov	plState, #plTxAddressState		;First byte = address
+	mov	plTxAddressByte, plConnAddr		;Address = ConnAddr
+	clrb	plTxAddressByte.0			;Indicate Cmd frame
+	pjmp	pl2flTxFrame				;Ask to framing layer to start a new frame
+
+;********** fl2plTxData - TxAddress State **********
+
+plTxAddress
+	inc	plState					;After address will send command
+	mov	w, plTxAddressByte			;Send Address
+	clz						;Indicate more data to follow
+	retp						;Return Data to framing layer
+
+;********** fl2plTxData - TxCommand State **********
+
+plTxCommand
+	mov	plState, plTxPostCommand		;After command will change to state given in TxIState
+	clr	plPosition				;Clear position just in case needed for following states
+	csne	plState, #plTxCompleteState		;Is this the last byte to be sent ?
+	jmp	:Last					;Yes
+	mov	w, plCommand				;Send Command
+	clz						;Indicate more data to follow
+	retp						;Return Data to framing layer
+:Last	mov	w, plCommand				;Send Command
+	stz						;Indicate complete
+	retp						;Return Data to framing layer
+
+;********************************************************************************
+;  PAYLOAD LAYER - Send Simple Frame
+;********************************************************************************
+
+lap2plTxSimpleCmd					;Transmit a frame of type specified in w
+	bank	plBank
+	mov	plCommand, w 				;Store command in plCommand
+	mov	plTxPostCommand, #plTxCompleteState	;After address & command frame will be complete
+	jmp	plTxCmdStart				;Set State and Address, and ask framing layer to start frame
+
+lap2plTxSimpleRsp					;Transmit a frame of type specified in w
+	bank	plBank
+	mov	plCommand, w 				;Store command in plCommand
+	mov	plTxPostCommand, #plTxCompleteState	;After address & command frame will be complete
+	jmp	plTxRspStart				;Set State and Address, and ask framing layer to start frame
+
+;********************************************************************************
+;  PAYLOAD LAYER - Send I Frame
+;********************************************************************************
+
+lap2plTxIRsp
+	bank	plBank
+	mov	plCommand, w 				;Store command in plCommand
+	mov	plTxPostCommand, #plTxIDataDLSAPState	;After address & command will send data
+	jmp	plTxRspStart				;Set State and Address, and ask framing layer to start frame
+
+plTxIDataDLSAP
+	inc	plState					;Next state = plTxIDataSLSAP
+	mov	w, plIDataDLSAP				;Send DLSAP byte
+	debug	IFrameDataTx				;Show debug info
+	clz						;Indicate more data to follow
+	retp
+
+plTxIDataSLSAP
+	inc	plState					;Next state = plTxIDataData
+	mov	w, plIDataSLSAP				;Send SLSAP byte
+	debug	IFrameDataTx				;Show debug info
+	clz						;Indicate more data to follow
+	retp
+
+plTxIDataData
+	pcall	pl2lapTxIData				;Get next byte to be transmitted (returns z = false if data)
+	debug	IFrameDataTx				;Show debug info
+	snz						;Is the z flag set (Last byte) ?
+	jmp	:Last					;Yes => jump
+	retp						;Z is still clear indicating more data to follow
+:Last	mov	Temp, w					;Backup data
+	bank	plBank
+	mov	plState, #plTxCompleteState		;New state = Wait for complete indication
+	mov	w, Temp					;Recover data
+	stz						;Indicate no more data to follow
+	retp
+
+;********************************************************************************
+;  PAYLOAD LAYER - Send UI Frame
+;********************************************************************************
+
+plTxUICmd
+	bank	plBank
+	mov	plCommand, #uUICmd			;Store command in plCommand
+	mov	plTxPostCommand, #plTxUIDataState	;After address & command will send data
+	jmp	plTxCmdStart				;Set State and Address, and ask framing layer to start frame
+
+plTxUIData
+	pcall	pl2lapTxUIData				;Get next byte to be transmitted (returns z = false if data)
+	snz						;Is the z flag set (Last byte) ?
+	jmp	:Last					;Yes => jump
+	retp						;Z is still clear indicating more data to follow
+:Last	mov	Temp, w
+	bank	plBank
+	mov	plState, #plTxCompleteState		;New state = Wait for complete indication
+	mov	w, Temp					;Recover data
+	stz						;Indicate no more data to follow
+	retp
+
+;********************************************************************************
+;  PAYLOAD LAYER - Send XID Frame
+;********************************************************************************
+
+;********** lap2plTxXIDCmd **********
+
+lap2plTxXIDCmd
+	bank	plBank
+	mov	plXIDSlot, w				;Store slot number
+	mov	plCommand, #uXIDCmd			;Command = XID command
+	mov	w, #$FF
+	mov	plDestAddr+0, w				;Dest address = FFFFFFFF
+	mov	plDestAddr+1, w				;Dest address = FFFFFFFF
+	mov	plDestAddr+2, w				;Dest address = FFFFFFFF
+	mov	plDestAddr+3, w				;Dest address = FFFFFFFF
+	mov	plXIDFlags, #2				;Set flags = 2 (=> 8 slots)
+	mov	plFrameType, #uXIDCmdFrame		;Rember that this is a XID Command Frame
+	mov	plTxPostCommand, #plTxXIDFormatState	;After address & command will send format
+	jmp	plTxCmdStart				;Set State and Address, and ask framing layer to start frame
+
+;********** lap2plTxXIDRsp **********
+
+lap2plTxXIDRsp
+	bank	plBank
+	mov	plCommand, #uXIDRsp			;Command = XID response
+	mov	plFrameType, #uXIDRspFrame		;Rember that this is a XID Response Frame
+	mov	plTxPostCommand, #plTxXIDFormatState	;After address & command will send format
+	jmp	plTxRspStart				;Set State and Address, and ask framing layer to start frame
+
+;********** fl2plTxNext - TxXIDFormat State **********
+
+plTxXIDFormat						;Send XID Format byte
+	inc	plState					;Next will send source
+	mov	w, #1					;Format = 1
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+
+;********** fl2plTxNext - TxXIDSource State **********
+
+plTxXIDSource	=	plTxSelfAddr
+
+;********** fl2plTxNext - TxXIDDest State **********
+
+plTxXIDDest	=	plTxDestAddr
+
+;********** fl2plTxNext - TxXIDFlags State **********
+
+plTxXIDFlags
+	inc	plState					;After Flags will send slot number (plTxSlotState)
+	mov	w, plXIDFlags				;Reply with same flags as received command frame
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+
+;********** fl2plTxNext - TxXIDSlot State **********
+
+plTxXIDSlot
+	csne	plFrameType, #uXIDRspFrame		;Is the frame a XID response frame ?
+	jmp	:Footer					;Yes => must send footer
+	csne	plXIDSlot, #$FF				;Is the slot number FF ?
+	jmp	:Footer					;Yes => must send footer
+	mov	plState, #plTxXIDVersionState		;No => Send slot followed by version only
+	jmp	:Send
+:Footer	mov	plState, #plTxXIDFooterState
+	clr	plPosition				;Set to 0 ready for footer
+:Send	mov	w, plXIDSlot				;Transmit slot number
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+
+;********** fl2plTxNext - TxXIDVersion State **********
+
+plTxXIDVersion
+	mov	plState, #plTxCompleteState		;After version will indicate complete
+	mov	w, #0					;Version = 0
+	stz						;Indicate complete
+	retp						;Return data to framing layer
+
+;********** fl2plTxNext - TxXIDFooter State **********
+
+plTxXIDFooter
+	mov	m, #_plXIDFooter / 256			;Pointer to string (high)
+	mov	w, #_plXIDFooter			;Pointer to string
+	jmp	plTxFooter
+
+;********************************************************************************
+;  PAYLOAD LAYER - Send UA Connection Frame
+;********************************************************************************
+
+lap2plSNRMAccept
+	bank	plBank
+	mov	plCommand, #uUARsp			;Send UA packet to accept connection
+	mov	plConnAddr, plSNRMConnAddr		;Apply connection address
+	setb	plConnAddr.0				;Only accept command frames
+	mov	plTxPostCommand, #plTxUASourceState	;After address & command will send source
+	jmp	plTxRspStart				;Set State and Address, and ask framing layer to start frame
+
+plTxUASource	=	plTxSelfAddr
+
+plTxUADest	=	plTxDestAddr
+
+plTxUABaudRate						;Send $01, $01, BaudRate
+	inc	plPosition
+	csne	plPosition, #3				;Is position 3 indicating to send BaudRate ?
+	jmp	:Baud					;Yes => send BaudRate
+	mov	w, #$01					;Data to send = $01
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+:Baud	inc	plState					;Next state = plTxUAParamState
+	clr	plPosition				;Clear position ready for next state
+	mov	w, plSNRMBaudRate			;Data to send = BaudRate
+	clz						;Indicate more data to follow
+	retp						;Return data to framing layer
+
+plTxUAParam
+	mov	m, #_plSNRMParam / 256			;Pointer to string (high)
+	mov	w, #_plSNRMParam			;Pointer to string
+	jmp	plTxFooter
+
+;********************************************************************************
+			ENDM
+
+PayloadString1		MACRO
+;********************************************************************************
+;  PAYLOAD LAYER - String	;WARNING - Strings must not go over a 256 boundry !!!
+;********************************************************************************
+
+_plUCommands							;Must be in the same order as the FrameType constants !!!
+_plUCommand6		dw	uUICmd				;UICmd or UIRsp (same command)
+_plUCommand7		dw	uDISCCmd			;DISCCmd or RDRsp (same command)
+_plUCommand8		dw	uUARsp				;UARsp
+_plUCommand9		dw	uSNRMCmd			;SNRMCmd or RNRMRsp (same command)
+_plUCommand10		dw	uTESTCmd			;TESTCmd or TESTRsp (same command)
+_plUCommand11		dw	uFRMRRsp			;FRMRRsp
+_plUCommand12		dw	uDMRsp				;DMRsp
+_plUCommand13		dw	uXIDCmd				;XIDCmd
+_plUCommand14		dw	uXIDRsp + $F00			;XIDRsp (F00 indicates end of string)
+
+;********************************************************************************
+			ENDM
+
+PayloadString2		MACRO
+;********************************************************************************
+;  PAYLOAD LAYER - String	;WARNING - Strings must not go over a 256 boundry !!!
+;********************************************************************************
+
+;_plSNRMParam1		dw	$01, 1, %00000010		;Baud Rate       = 9600 bps	Flexible
+_plSNRMParam
+_plSNRMParam2		dw	$82, 1, %00000001		;Turnaround      = 500 ms	Solid
+_plSNRMParam3		dw	$83, 1, %00000001		;Data Size       = 64 bytes	Flexible ?
+_plSNRMParam4		dw	$84, 1, %00000001		;Window Size     = 1		Solid
+_plSNRMParam5		dw	$85, 1, %10000000		;Additional BOFs = 0		Solid
+_plSNRMParam6		dw	$86, 1, %00000011		;Min turnaround  = 5/10 ms	Solid to IrDA Transeiver spec
+_plSNRMParam7		dw	$08, 1, %00000001+$F00		;Disconnect      = 3 s		Solid
+
+;********************************************************************************
+			ENDM
+
+PayloadString3		MACRO
+;********************************************************************************
+;  PAYLOAD LAYER - String	;WARNING - Strings must not go over a 256 boundry !!!
+;********************************************************************************
+
+_plXIDFooter
+_plXIDVersion		dw	0				;Version = 0 (only possible)
+_plXIDHints		dw	$80, $04			;Hints   = IrComm
+_plXIDCharset		dw	0				;Charset = ASCII
+_plXIDNickname		dw	'SX IrComm Device'+$F00		;Nickname ($F00 indicates end)
+
+;********************************************************************************
+			ENDM

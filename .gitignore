@@ -1,5 +1,9 @@
 # Prerequisites
 *.d
+*.SCH
+*.MAP
+*.LST
+*.NET
 
 # Compiled Object files
 *.slo

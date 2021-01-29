@@ -1,0 +1,1207 @@
+;******************************************************************************
+; Copyright © [04/22/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+; Filename: 	Freq_Det_1_03.src	
+;
+; Authors:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix Semiconductor,Inc
+;
+; Revision:	1.03
+;
+; Part:		SX28AC datecode 9929AA
+; Freq:		50Mhz
+; Compiled using Parallax SX-Key software v1.07 and SASM 1.40
+;
+; Date Written: 04/22/1999
+;
+; Last Revised: 10/20/1999
+;
+; Program Description:
+;	This program demonstrates the use of a correlation algorithm
+;	to calculate how similar an incoming frequency is to a frequency
+;	input by the user.  It uses a sigma-delta A/D in conjunction with
+;	simple arithmetic to accumulate the filter output.
+;	
+;	This program is compatible with the SX-Demo board, but some values need to
+;	be modified to run the sigma-delta A/D converter.  R12 should be 10k,
+;	R11 should be 22k, and C7 should be 1000pF.  These values gave excellent
+;	results when used with a function generator.  For best results, set the output
+;	of the function generator to 2.5VDC with an output swing of about 0.8V.
+;	For a more sensitive A/D, Decrease the value of R11, while increasing the value
+;	of R12.
+;
+;
+;		R12		R11
+;		10k		22k
+;	RC0-----\/\/----x-------\/\/------>Vin (2.5V +/- 0.8V)
+;			|
+;	RC1-------------x
+;			|
+;		      ----- C7
+;		      ----- 1000pF
+;			|
+;			O
+;		       VSS
+;
+;
+;	SCREENSHOT:
+;	
+;	SX Frequency Detector
+;	Enter a frequency in Hz: 1000
+;	Press any key to escape
+;	LEVEL:*****************************************************           >
+;
+;	This program runs on the Parallax SX-Demo board.
+;	It uses a baud rate which is chosen by uncommenting the appropriate baud rate defines below:
+;
+;	19200 baud (sample rate /16)
+;		baud_bit	=       4                       ;for 19200 baud
+;		start_delay	=       16+8+1                  ; "    "     "
+;		int_period	=       163                     ; "    "     "
+;	38400 baud (sample rate /8)
+;		baud_bit	=       3                       ;for 38400 baud
+;		start_delay	=       8+4+1                  ; "    "     "
+;		int_period	=       163                     ; "    "     "
+;	57600 baud (sample rate /8)
+;		baud_bit	=       3                       ;for 57600 baud
+;		start_delay	=       8+4+1                  ; "    "     "
+;		int_period	=       109                     ; "    "     "
+;	115.2kbaud (sample rate /4)
+		baud_bit	=       2                       ;for 115200 baud
+		start_delay	=       4+2+1                  ; "    "     "
+		int_period	=       109                     ; "    "     "
+;
+;       Length:  731 words
+;	Version: 1.02
+;	Revision History
+;		1.0	Initial program written.
+;		1.01 	Some formatting and documentation changed, as well as some subroutines
+;			such as delay_n_ms.
+;		1.02	Re-documented for use with SASM and SX-52
+;			Re-wrote some of the routines for compatibility with
+;			SX-52.
+;		1.03	Removed CARRYX directive and modified code accordingly
+;******************************************************************************
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+SX28
+;SX48_52
+;SX48_52_ES
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oscxt4,turbo,stackx_optionx,carryx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oscxt4,turbo,stackx_optionx,carryx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx,carryx
+  ELSE
+    IFDEF SX48_52				;SX48/52/BD device directives for SX-Key
+		device	oschs2,stackx_optionx,carryx
+    ENDIF
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs2,turbo,stackx,optionx,carryx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs2,turbo,stackx,optionx,carryx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx,carryx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs2,stackx,optionx,carryx
+    ENDIF
+  ENDIF
+ENDIF
+		id	'DFT1_02 '			;
+		reset	reset_entry			; JUMP to start label on reset
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+_bank	macro	1
+	bank	\1
+
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+	    ELSE
+		clrb	fsr.7
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+	IFDEF SX48_52
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+	ELSE
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+	ENDIF
+	endm
+
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+		org     global_org
+
+temp		equ	global_org	; Temporary storage register
+temp2		equ	global_org+1
+flags		equ	global_org+2
+	freq_det_en	equ	flags.0
+	timer_flag	equ	flags.1
+	rx_flag		equ	flags.2
+loopcount	equ	global_org+3
+isr_temp	equ	global_org+4
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+bank0		=	$
+timers		=	$
+timer_l		ds	1
+timer_m		ds	1
+timer_h		ds	1
+sine_gen_bank	=	$
+freq_acc_l	ds	1
+freq_acc_h	ds	1
+freq_count_l	ds	1
+freq_count_h	ds	1
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+bank1		=	$
+
+freq_det_bank	=	$
+
+sine_index	ds	1
+sine_value	ds	1
+cose_value	ds	1
+sine_acc_l	ds	1
+sine_acc_h	ds	1
+cose_acc_l	ds	1
+cose_acc_h	ds	1
+
+math_bank	=	$
+
+answer_l	ds	1
+answer_h	ds	1
+input		ds	1
+input2		ds	1
+loop_count	ds	1
+math_flags	ds	1
+neg		equ	math_flags.0
+root_mask	ds	1
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+
+serial		=       $                       ;UART bank
+
+tx_high		ds      1                       ;hi byte to transmit
+tx_low		ds      1                       ;low byte to transmit
+tx_count	ds      1                       ;number of bits sent
+tx_divide	ds      1                       ;xmit timing (/16) counter
+rx_count	ds      1                       ;number of bits received
+rx_divide	ds      1                       ;receive timing counter
+rx_byte		ds      1                       ;buffer for incoming byte
+string		ds	1
+byte		ds	1
+dec_l		ds	1			;Holds the 16-bit value returned
+dec_h		ds	1			;from get_dec subroutine.
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+bank3		=	$
+
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+bank4		=	$
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+bank5		=	$
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+bank6		=	$
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+bank7		=	$
+IFDEF SX48_52
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+bank8		=	$
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+bank9		=	$
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+bankA		=	$
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+bankB		=	$
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+bankC		=	$
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+bankD		=	$
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+bankE		=	$
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+bankF		=	$
+ENDIF
+	;*****************************************************************************************
+	; Port Assignment
+	;*****************************************************************************************
+
+RA_init		equ	%11111111		;SX18/20/28/48/52 port A latch init
+RA_io		equ	%11110111		;SX18/20/28/48/52 port A DDIR value
+RA_plp		equ	%11111100		;SX18/20/28/48/52 port A PLP value (pullups)
+RA_cmos		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RB_init		equ	%11111111		;SX18/20/28/48/52 port B latch init
+RB_io		equ	%11111111		;SX18/20/28/48/52 port B DDIR value
+RB_cmos		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RC_init		equ	%00000000		;SX18/20/28/48/52 port C latch init
+RC_io		equ	%11111110		;SX18/20/28/48/52 port C DDIR value
+RC_cmos		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+
+IFDEF SX48_52
+RD_init		equ	%11111111		;SX48/52 port D latch init
+RD_io		equ	%11111111		;SX48/52 port D DDIR value
+RD_cmos		equ	%00000000		;SX18/20/28/48/52 port D LVL value
+RE_init		equ	%11111111		;SX48/52 port E latch init
+RE_io		equ	%11111111		;SX48/52 port E DDIR value
+RE_cmos		equ	%00000000		;SX18/20/28/48/52 port E LVL value
+ENDIF
+
+	;**************************************************************************
+	; Pin Definitions
+	;**************************************************************************
+rx_pin          EQU     ra.2                    ;UART receive input
+tx_pin          EQU     ra.3                    ;UART transmit output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;**************************************************************************
+;**************************************************************************
+;**************************************************************************
+; START OF PROGRAM MEMORY HERE!!!
+	org	0
+;**************************************************************************
+; Interrupt...  This interrupt routine has two different vectors with two seperate
+;		interrupt rates.  As a result, the UART MUST be finished sending
+;		before the rates are switched.  This is why the send_byte routine
+;		was changed to not exit until the entire byte has been sent.
+;**************************************************************************
+	mov	w,>>rc			;1	; Perform negative feedback on input
+	not	w			;1	; signal.  Continue even when DFT is not
+	mov	rc,w			;1	; running, to keep input at 2.5V DC
+	snb	freq_det_en		;1	; IF frequency detection is enabled, go 
+	jmp	@SINE_DETECTION		;3	; to the frequency detection ISR instead.
+;--------------------------------------------------------------------------
+:transmit
+; This is an asynchronous transmitter for RS-232 transmission
+; INPUTS:
+;	divider.divider_bit -	Transmitter/receiver only executes when this bit is = 1
+;	tx_divide.baud_bit  -	Transmitter only executes when this bit is = 1
+;	tx_high		    -	Part of the data to be transmitted
+;	tx_low		    -	Some more of the data to be transmitted
+;	tx_count	    -	Counter which counts the number of bits transmitted.
+; OUTPUTS:
+;	tx_pin		    -	Sets/Clears this pin to accomplish the transmission.
+;--------------------------------------------------------------------------
+		bank	serial
+		clrb    tx_divide.baud_bit      ;clear xmit timing count flag
+		inc     tx_divide               ;only execute the transmit routine
+		STZ                             ;set zero flag for test
+		SNB     tx_divide.baud_bit      ; every 2^baud_bit interrupt
+		test    tx_count                ;are we sending?
+		JZ      :receive                ;if not, go to :receive
+		clc                             ;yes, ready stop bit
+		rr      tx_high                 ; and shift to next bit
+		rr      tx_low                  ;
+		dec     tx_count                ;decrement bit counter
+		movb    tx_pin,/tx_low.6        ;output next bit
+
+;--------------------------------------------------------------------------
+:receive
+; This is an asynchronous receiver for RS-232 reception
+; INPUTS:
+;	rx_pin		   -	Pin which RS-232 is received on.
+; OUTPUTS:
+;	rx_byte		   -	The byte received
+;	rx_flag		   -	Set when a byte is received.
+;--------------------------------------------------------------------------
+		movb    c,rx_pin                ;get current rx bit
+		test    rx_count                ;currently receiving byte?
+		jnz     :rxbit                  ;if so, jump ahead
+		mov     w,#9                    ;in case start, ready 9 bits
+		sc                              ;skip ahead if not start bit
+		mov     rx_count,w              ;it is, so renew bit count
+		mov     rx_divide,#start_delay  ;ready 1.5 bit periods
+:rxbit		djnz    rx_divide,:rxdone       ;middle of next bit?
+		setb    rx_divide.baud_bit      ;yes, ready 1 bit period
+		dec     rx_count                ;last bit?
+		sz                              ;if not
+		rr      rx_byte                 ;  then save bit
+		snz                             ;if so
+		setb    rx_flag                 ;  then set flag
+:rxdone
+;******************************************************************************
+:ISR_DONE
+;******************************************************************************
+		mov	w,#-int_period
+					;1	; interrupt (int_period) cycles from the start of this interrupt.
+		retiw			;3	; return from the interrupt
+;**************************************************************************
+; This is the end of the interrupt service routine for the UARTs
+;**************************************************************************
+; This is the beginning of the interrupt service routine for the Frequency detection
+;**************************************************************************
+;--------------------------------------------------------------------------
+sine_table	;7 cycles		; Returns with the value at (w) in (w)
+;	This entire table MUST be located in the first half of the page
+;	from which it is called.
+;--------------------------------------------------------------------------
+;		Returns the sine value at index.
+	clc			;1
+	jmp	pc+w		;3,3 
+	retw	0
+	retw	3
+	retw	6
+	retw	8
+	retw	11
+	retw	12
+	retw	14
+	retw	15
+	retw	15
+	retw	15
+	retw	14
+	retw	12
+	retw	11
+	retw	8
+	retw	6
+	retw	3
+	retw	0
+	retw	-3
+	retw	-6
+	retw	-8
+	retw	-11
+	retw	-12
+	retw	-14
+	retw	-15
+	retw	-15
+	retw	-15
+	retw	-14
+	retw	-12
+	retw	-11
+	retw	-8
+	retw	-6
+	retw	-3
+	jmp	$
+;--------------------------------------------------------------------------
+SINE_DETECTION					;4 
+; 	Part of the interrupt service routine!!!  This routine adds or 
+;	subtracts the values of the sine and cose references from their
+;	corresponding accumulators, depending on whether or not the input
+;	matches or does not match the reference.
+;--------------------------------------------------------------------------
+		bank	sine_gen_bank		;1
+		clr	isr_temp
+		add	freq_acc_h,freq_count_h	;2	; and cose references, this addition
+		snc
+		setb	isr_temp.0
+		add	freq_acc_l,freq_count_l	;2	; If it is time to update the sine
+		snc
+		inc	freq_acc_h
+		test	freq_acc_h
+		jnz	:no_update		;1 15
+		jnb	isr_temp.0,:no_update
+
+:update		bank	freq_det_bank		;1	; OK, Carry produced.  Now, update the
+		inc	sine_index		;1	; sine and cose references.  Do this
+		mov	w,sine_index		;1	; by incrementing the index into the table.
+		and	w,#$1f			;1
+		call	sine_table		;7 26	; and get the value at (index)
+
+		mov	sine_value,w		;1	; store the new sine reference value
+
+		mov	w,#8			;1	; Now get the cose reference value.  Add 8
+		add	w,sine_index		;1	; to the sine index and get the value at 
+		and	w,#$1f			;1	; this location.
+		call	sine_table		;7
+
+		mov	cose_value,w		;1 38	; store the new cose reference value. 
+:no_update
+		bank	freq_det_bank		;1	; Perform the DFT calculations.  If the
+do_sine_ref						; negative feedback pin is positive, add 
+		mov	w,sine_value		;1	; the reference, otherwise subtract it.
+		sb	rc.0			;1
+		jmp	:add_reference		;3
+:sub_reference
+		stc				;1 43	; Signed 16-bit subtraction of 8-bit reference
+		sub	sine_acc_l,w		;1
+		clr	w			;1
+		snb	sine_value.7		;1
+		not	w			;1
+		sub	sine_acc_h,w		;1
+		jmp	do_cose_ref		;3 49
+:add_reference
+		clc				;1 44	; Signed 16-bit addition of 8-bit reference
+		add	sine_acc_l,w		;1
+		clr	w			;1
+		snb	sine_value.7		;1
+		not	w			;1
+		add	sine_acc_h,w		;1 50
+do_cose_ref
+		mov	w,cose_value		;1 52	; Now do the same calculations for the cose
+		sb	rc.0			;1	; reference.
+		jmp	:add_reference		;3,1 
+:sub_reference
+		stc				;1 55	; Signed 16-bit subtraction of 8-bit reference
+		sub	cose_acc_l,w		;1
+		clr	w			;1
+		snb	cose_value.7		;1
+		not	w			;1
+		sub	cose_acc_h,w		;1
+		jmp	DFT_DONE		;3 63
+:add_reference
+		clc				;1 56	; Signed 16-bit addition of 8-bit reference
+		add	cose_acc_l,w		;1
+		clr	w			;1
+		snb	cose_value.7		;1
+		not	w			;1
+		add	cose_acc_h,w		;1 64
+
+DFT_DONE					; 65
+do_nothing
+		sb	rx_pin			; If the rx_pin goes low, set a flag to indicate
+		setb	rx_flag			; it is time to reset the program.  (User has pushed a key.)
+;--------------------------------------------------------------------------
+do_timers	bank	timers			; 16-bit timer for delay_n_ms routine.  These timers tick at
+						; a rate of (interrupt rate * 20ns) = 2.38us = 420.168 kHz
+		inc	timer_l
+		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+;**************************************************************************
+;	End of the ISR for the Frequency detection algorithm.
+;**************************************************************************
+	mov	w,#-119			; Return value for easy DFT constants.  (frequency * 5)
+	retiw
+	
+;**************************************************************************
+; END OF THE INTERRUPT SERVICE ROUTINES!!!
+;**************************************************************************
+;**************************************************************************
+
+
+
+
+
+;**************************************************************************
+org	$1fe
+;******************************************************************************************
+reset_entry			; Program starts here on power-up and on reset.
+		jmp	@start	; jump to the main program.
+;**************************************************************************
+org	$200
+;******************************************************************************************
+org	$300
+;**************************************************************************
+; String data (for RS-232 output) and tables needs to be in page $300 for send_string
+; to work.
+;**************************************************************************
+_hello          dw      13,10,'SX Frequency Detector',0
+_enter_freq	dw	13,10,'Enter a frequency in Hz: ',0		
+_press_key	dw	13,10,'Press any key to escape',13,10,0
+_CR		dw	13,10,0	
+_error		dw	13,10,'ERROR: Value is too large.  Must be <= 13107Hz.  Press ENTER ',0
+_dec_error	dw	13,10,'ERROR: Value is too large.  Must be <= 65535 :',0
+_LEVEL		dw	13,'LEVEL:',0
+;******************************************************************************************
+org	$400
+;--------------------------------------------------------------------------
+delay_n_ms
+; This subroutine delays 'w' milliseconds. 
+; This subroutine uses the TEMP register
+; INPUT		w	-	# of milliseconds to delay for.
+; OUTPUT	Returns after n milliseconds.
+;--------------------------------------------------------------------------
+	mov	temp,w
+	bank	timers
+:loop	clrb	timer_flag	; This loop delays for 1ms
+;	mov	timer_h,#$0fe
+;	mov	timer_l,#$0cd
+	mov	timer_h,#$0fe	; These constants are used for the 119 cycle interrupt rate.
+	mov	timer_l,#$05c
+	jnb	timer_flag,$
+	dec	temp		; do it w-1 times.
+	jnz	:loop
+	clrb	timer_flag
+	retp
+;--------------------------------------------------------------------------
+; Initialization Code...
+;--------------------------------------------------------------------------
+init
+	_mode	$1d			; CMOS Init
+	mov	!ra,#RA_cmos		
+	mov	!rb,#RB_cmos
+	mov	!rc,#RC_cmos
+	_mode	$1f
+	mov     ra,#RA_init              	; Initialize data latches for ports
+	mov	rb,#RB_init
+	mov	rc,#RC_init
+						; Initialize direction registers for ports.
+	mov	!ra,#RA_io		; port A.
+	mov	!rb,#RB_io		; port B.
+	mov	!rc,#RC_io		; port C.
+
+	call	@zero_ram
+	mov     !option,#%00011111      ; enable rtcc interrupt and wreg, no prescaler on RTCC.
+
+	retp
+;--------------------------------------------------------------------------
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;--------------------------------------------------------------------------
+IFDEF SX48_52   				;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zero_ram	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+
+		_bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+ELSE     					;SX18/20/28 RAM clear routine
+		clr	fsr			;reset all ram banks
+:zero_ram	sb	fsr.4			;are we on low half of bank?
+		setb	fsr.3			;If so, don't touch regs 0-7
+		clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+ENDIF
+		retp
+;--------------------------------------------------------------------------
+SignedMultiply
+;	8 * 8 Signed Multiply
+;	INPUTS:		Multiplies input2 * input
+;	OUTPUTS:	16-bit Signed value in answer_l and answer_h
+;				(low byte and high byte, respectively)
+;--------------------------------------------------------------------------
+	mov	input2,w	;1
+	mov	w,#$ff		;1
+	sb	input.7		;1
+	jmp	:input2		;1,3
+	xor	input,w		;1
+	inc	input		;1
+	inc	loop_count	;1;7
+:input2
+	sb	input2.7	;1
+	jmp	:done		;1	
+	xor	input2,w	;1
+	inc	input2		;1
+	inc	loop_count	;1;12
+:done
+	setb	neg		;1
+	sb	loop_count.0	;1
+	clrb	neg		;1
+	clr	loop_count	;1
+	mov	w,input2	;1;17
+	call	Multiply	;87;104
+
+	sb	neg		;1
+	retp			;3
+	mov	w,#$ff		;1
+	xor	answer_h,w	;1
+	xor	answer_l,w	;1
+	inc	answer_l	;1
+	snz			;1
+	inc	answer_h	;1
+	retp			;3;113 cycles worst case
+		
+;--------------------------------------------------------------------------
+Multiply ; Multiply W by input
+;	INPUTS:		W * input
+;	OUTPUTS: 	16-bit output value in answer_l and answer_h
+;--------------------------------------------------------------------------
+	setb	loop_count.3	;1
+	clr	answer_l	;1
+	clr	answer_h	;1 ;3
+:loop
+	clc			;1
+	snb	input.0	;1
+	add	answer_h,w	;1
+	rr	answer_h	;1
+	rr	answer_l	;1
+	rr	input		;1
+	decsz	loop_count	;1
+	jmp	:loop		;3	10=looptime (78 on exit)
+				;    	78 + 3 = 81
+	retp			;3	82 + 3 = 84	ALWAYS!!!
+				;	for 16 bit result.
+;--------------------------------------------------------------------------
+clear_bank	; Clears an entire bank of RAM.
+		; To use, first load the FSR with the starting address 
+		; of the bank to clear.
+;--------------------------------------------------------------------------
+:loop
+	clr	indf
+	inc	fsr
+	sb	fsr.4
+	retp
+	jmp	:loop
+;--------------------------------------------------------------------------
+;	SQ_ROOT 		; By John Keenan
+;	Routine to take the square root of a 16 bit unsigned number
+;	entry: 	input - low byte of number
+;		input2 - high byte of number
+;	exit:	W register returns 8 bit result
+;--------------------------------------------------------------------------
+
+sq_root		mov	root_mask,#$c0		; initialise root_mask
+		mov	w,#$40			; initialise answer
+
+
+:sq1		stc
+		sub	input2,w		; subtract the root develped so far
+		sc				; restore subtraction if carry cleared
+		jmp	:sq5
+
+:sq2		or	w,root_mask		; set the current bit
+		
+:sq3		nop
+		rl	input			; shift number left one position
+		rl	input2
+		rr	root_mask		; picks up ms bit of input2
+		snb	root_mask.7
+		jmp	:sq6
+
+		xor	w,root_mask		; append 01 to the root developed so far
+		sc				; if the lsb of root_mask was shifted into carry,
+		jmp	:sq1			; then we're done. Otherwise loop again
+
+		stc
+		sub	input2,w		; 
+		sc
+		retp
+
+		snz
+		snb	input.7
+		xor	w,#1
+		retp
+
+:sq6		snc
+		retp
+
+		clrb	root_mask.7
+		xor	w,root_mask
+		stc
+		sub	input2,w
+		jmp	:sq2
+
+:sq5		add	input2,w		; carry=0 here
+		jmp	:sq3
+;--------------------------------------------------------------------------
+; Subroutine - Get byte via serial port and echo it back to the serial port
+; INPUTS:
+;	-NONE
+; OUTPUTS:
+;	-received byte in w, and byte
+;--------------------------------------------------------------------------
+get_byte     	jnb     rx_flag,$		;wait till byte is received
+		clrb    rx_flag		;reset the receive flag
+		bank	serial
+		mov     byte,rx_byte		;store byte (copy using W)
+						; & fall through to echo char back
+		retp
+;--------------------------------------------------------------------------
+; Subroutine - Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+;--------------------------------------------------------------------------
+send_byte    	bank    serial
+
+
+		not     w                       ;ready bits (inverse logic)
+		mov     tx_high,w               ; store data byte
+		setb    tx_low.7                ; set up start bit
+		mov     tx_count,#10            ;1 start + 8 data + 1 stop bit
+
+:wait        	test    tx_count                ;wait for not busy
+		jnz     :wait                   ;
+
+		RETP                            ;leave and fix page bits
+;--------------------------------------------------------------------------
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;--------------------------------------------------------------------------
+send_string	bank	serial
+ 		mov     string,w                ;store string address
+:loop        	mov     w,string                ;read next string character
+		mov     m,#3                    ; with indirect addressing
+		iread                           ; using the mode register
+		mov     m,#$F                   ;reset the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		RETP                            ;yes, leave & fix page bits
+		call    send_byte               ;not 0, so send character
+		inc     string                  ;point to next character
+		jmp     :loop                   ;loop until done
+
+;--------------------------------------------------------------------------
+; Subroutine - Make byte uppercase
+; INPUTS:
+;	byte	-	The byte to be converted
+;--------------------------------------------------------------------------
+uppercase    	csae	  byte,#'a'            	;if byte is lowercase, then skip ahead
+		RETP
+
+		sub     byte,#'a'-'A'           ;change byte to uppercase
+		RETP                            ;leave and fix page bits
+;--------------------------------------------------------------------------
+; Subroutine - Output a hex number
+; INPUTS:
+;	w	-	The byte to be output
+;--------------------------------------------------------------------------
+send_hex
+	mov	temp,w
+	swap	wreg
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	mov	w,temp
+	and	w,#$0f
+	call	hex_table
+	call	send_byte
+	retp
+
+hex_table	; called by send_hex
+;--------------------------------------------------------------------------
+	clc
+	add	pc,w
+	retw	'0'
+	retw	'1'
+	retw	'2'
+	retw	'3'
+	retw	'4'
+	retw	'5'
+	retw	'6'
+	retw	'7'
+	retw	'8'
+	retw	'9'
+	retw	'A'
+	retw	'B'
+	retw	'C'
+	retw	'D'
+	retw	'E'
+	retw	'F'
+;--------------------------------------------------------------------------
+dec_table	; called by get_dec
+;--------------------------------------------------------------------------
+	clc
+	add	pc,w
+	retw	'0'
+	retw	'1'
+	retw	'2'
+	retw	'3'
+	retw	'4'
+	retw	'5'
+	retw	'6'
+	retw	'7'
+	retw	'8'
+	retw	'9'
+	retw	0
+	retw	0
+	retw	0
+	retw	13		; A carriage return will be valid.  It will return 
+	retw	0		; with the value of a CR in it.
+	retw	0
+;--------------------------------------------------------------------------
+get_dec
+;	This routine returns with an 16-bit value in dec_l and dec_h registers
+;	register.  It accepts a decimal number from the terminal screen and
+;	returns when the number is within range and the user presses <return>
+;--------------------------------------------------------------------------
+	bank	serial
+	clr	dec_l
+	clr	dec_h
+:get_next
+	call	:get_valid_dec	; get a valid decimal number.
+	mov	w,#13
+	xor	w,byte
+	jz	:done
+	clc			; multiply current dec input by 10.
+	rl	dec_l
+	rl	dec_h
+	jc	:error
+	mov	temp,dec_l	; save (last number * 2)
+	mov	temp2,dec_h
+	rl	dec_l
+	rl	dec_h
+	jc	:error	
+	rl	dec_l
+	rl	dec_h
+	jc	:error
+	add	dec_l,temp
+	add	dec_h,temp2	; add ((last number * 2) + (last number * 10))
+	jc	:error
+	add	dec_l,byte
+	clr	w
+	add	dec_h,w
+	jc	:error
+	jmp	:get_next	; Get the next valid decimal number
+	
+:done	
+	retp
+:error
+	mov	w,#_dec_error
+	call	@send_string	; Send the error message if the decimal number
+				; is too long.
+	jmp	get_dec		; and start over.
+;--------------------------------------------------------------------------
+:get_valid_dec	; Return with a character which is a valid decimal number,
+		; or with a '13' in 'byte' if the user presses return.
+;--------------------------------------------------------------------------
+	bank	serial
+	call	@get_byte
+	clr	temp
+:loop
+	mov	w,temp
+	call	dec_table
+	xor	w,byte
+	jz	:got_it
+	inc	temp
+	jb	temp.4,:get_valid_dec
+	jmp	:loop
+:got_it
+	mov	w,byte
+	call	@send_byte
+	mov	byte,temp
+	ret
+;******************************************************************************************
+org	$600
+;******************************************************************************************
+;		START OF MAIN PROGRAM
+start		call	@init	; Initialize all registers and ports.	
+	;******************************************************************************************
+	; Send Hello message
+	;******************************************************************************************
+
+		mov	w,#_hello		; Send hello string.
+		call	@send_string
+	;******************************************************************************************
+	; Get the desired 16-bit frequency value from the user.
+	;******************************************************************************************
+		mov	w,#_enter_freq		; Prompt for frequency value
+		call	@send_string
+		call	@get_dec		; Get Frequency value
+
+		mov	temp,dec_h		; Store the input 16-bit decimal value
+		mov	temp2,dec_l
+	;******************************************************************************************
+	; Now multiply the input frequency by 5 and load it into the freq_count registers.  This
+	; will produce a constant which will cause the sine and cose reference generators to 
+	; construct a sine/cose wave of the desired frequency.  The value of 5 is determined by a 
+	; number of factors, including the size of the sine lookup table, and the interrupt rate,
+	; which is 419.4 kHz in this application during the frequency detection.  If, while multiplying
+	; the input frequency by 5, the result exceeds 16-bits, output an error message.
+	;******************************************************************************************
+		bank	sine_gen_bank
+		mov	w,temp
+		mov	freq_count_h,w
+		mov	freq_acc_h,w		; save the upper byte in the input register
+		mov	w,temp2
+		mov	freq_count_l,w		; move it into freq_count_l
+		clc				; Multiply freq_count by 5 because with the known interrupt
+						; rate, this is the constant to use.
+		rl	freq_count_l		; First multiply freq_count by 4
+		rl	freq_count_h
+		jc	input_error		; If the input was too high, say "error"
+		rl	freq_count_l
+		rl	freq_count_h
+		jc	input_error		; If the input was too high, say "error"
+		add	freq_count_l,w		; freq_count = freq_count + 4(freq_count)
+		add	freq_count_h,freq_acc_h	; = 5(freq_count)
+		jc	input_error		; If the input was too high, say "error"
+	;******************************************************************************************
+	; There is a slight discrepancy between the actual interrupt rate and the ideal interrupt
+	; rate, but luckily this is easily remedied by performing this calculation:
+	; freq_count = freq_count - (freq_count/512)
+	;******************************************************************************************
+		mov	w,freq_count_h		; Compensate for the interrupt rate discrepancy
+		clc				; by performing this calculation: Frequency = Frequency - (Frequency/512)
+		rr	wreg			; Divide frequency by 512
+		stc
+		sub	freq_count_l,w		; subtract (frequency/512) from frequency
+		sc
+		dec	freq_count_h		
+		mov	w,#_press_key		; Send out a carriage return.
+		call	@send_string
+		clrb	rx_flag
+
+	;******************************************************************************************
+	; Now get into the loop which detects a frequency for 40ms, and then outputs the results
+	; of the DFT in a level meter on the screen.
+	;******************************************************************************************
+:loop		jb	rx_flag,start
+		mov	w,#_LEVEL		; Send "LEVEL :" message.
+		call	@send_string
+		mov	fsr,#freq_det_bank	; clear the bank of sin/cos accumulators
+		call	@clear_bank
+		setb	freq_det_en		; Enable the frequency detectors
+		mov	w,#40
+		call	@delay_n_ms		; Detect for 40ms
+		clrb	freq_det_en		; Disable the frequency detectors (Enabling the UARTs)
+		;**********************************************************************
+		; Now the sine and cose accumulators have been loaded with values which correspond 
+		; with the magnitude of the signal at the chosen frequency.  To get the actual
+		; magnitude, we need to perform this calculation:
+		; MAG = (SIN_acc^2 * COS_acc ^2)^(-2) 
+		; Just like (a^2 + b^2 = c^2), where c is the magnitude
+		;**********************************************************************
+		bank	math_bank		; Calculation 1
+		mov	input,sine_acc_h	
+		mov	input2,sine_acc_h
+		call	@SignedMultiply		; SIN_acc^2
+		mov	sine_acc_h,answer_h
+		mov	sine_acc_l,answer_l
+
+		mov	input,cose_acc_h	; Calculation 2
+		mov	input2,cose_acc_h
+		call	@SignedMultiply		; COS_acc^2
+		clc
+
+		mov	w,answer_l		; Calculation 3
+		add	w,sine_acc_l
+		mov	input,w
+		mov	w,answer_h
+		add	w,sine_acc_h		; (SIN_acc^2 + COS_acc^2)
+						
+		mov	input2,w		; Calculation 4
+		call	@sq_root		; (SIN_acc^2 + COS_acc^2)^(-2)
+		;**********************************************************************
+		; Now display the detected magnitude on the screen, as a level meter
+		; composed of stars.  
+		;**********************************************************************
+		mov	answer_l,w
+		clr	answer_h
+		break
+		jb	answer_l.7,:max
+		rr	answer_l	; Maximum value is 63
+		mov	w,answer_l
+:max_enter	and	w,#$3f		; Ensure that the maximum value is 63.
+		mov	temp,w
+		mov	loopcount,#64	; Output 1 space the number of stars.
+		test	temp
+:star_loop
+		jz	:space_loop	; Output [temp] stars (maximum of 63)
+		mov	w,#'*'
+		call	@send_byte
+		dec	loopcount
+		dec	temp
+		jmp	:star_loop
+:space_loop
+		mov	w,#' '		; Output [loopcount - temp] spaces
+		call	@send_byte
+		decsz	loopcount
+		jmp	:space_loop
+
+:done_stars	mov	w,#'>'		; Output a '>' to show the maximum level.
+		call	@send_byte
+		jmp	:loop		; Do ALL over again.
+
+:max
+		mov	w,#$ff		; If the input value was maxed out, 
+		jmp	:max_enter	; show the absolute maximum on the screen.
+		
+
+
+input_error
+		mov	w,#_error	; We get here if the user input a value > 13107Hz
+		call	@send_string	; 13107 is 65535/5.
+:CR_loop	call	@get_byte	; Wait until user presses CR
+		mov	w,byte
+		xor	w,#13
+		jnz	:CR_loop
+		jmp	start	; and restart the process

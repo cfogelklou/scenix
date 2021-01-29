@@ -1,0 +1,750 @@
+;******************************************************************************
+; Copyright © [07/23/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;******************************************************************************
+;
+; Filename:	silabs_codec_interface.src
+;
+; Author:	Abraham Si
+;		Systems Engineer
+;		Scenix, Inc.
+;
+; Author's Description:
+; 		DTMF detection with the SX, using Silicon Labs DAA revision 3.291
+; 		the following code is working code only, it is not optimized, 
+;		nor is it the best embodiment. Caveat Emptor!
+;
+; Rev. 1.05:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix, Inc.
+;
+; Description:	Interface to a Silicon Labs 2032 Codec Chipset
+;
+;		This program is written to enable testing of a digital DTMF detection
+;		and dial-tone detection algorithm for a PBX project by AD-TRAN.
+;
+;		This program is written to run on a Parallax SX-Demo board, interfacing
+;		to a Silicon Labs DAA demo board, model number Si3032-EVB Rev 1.4.
+;		The SiLabs Demo board provides a series of coloured wires as an
+;		interface.  These wires are used, from an overhead perspective, top to bottom:
+;
+;		Yellow, Orange, Red, Brown, Black, White, Grey:		Not Used	
+;		Purple:							RB.6	
+;		Blue:							Not Used
+;		Green:							RB.5
+;		Yellow:							RB.4
+;		Orange:							RB.7
+;		Red:							Not Used
+;		Brown:							GND
+;
+;		The speaker on the SX-Demo board was removed by cutting a lead on C3, to remove
+;		any annoying chirps that might occur in using RB.7 as an interface line.
+;
+;
+; Revision:	1.05
+;
+; Date:		August 27, 1999.
+;
+; Part:		Ax datecode SX28 Silicon
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key 28L software v1.07
+;
+;**************************************************************************
+; Watch Windows
+;**************************************************************************
+
+watch	bit_count,8,udec
+
+watch	data_in_low,8,udec
+watch	data_in_high,8,udec
+
+watch	data_out_low,8,uhex
+watch	data_out_high,8,uhex
+
+watch	reg_data_low,8,uhex
+watch	reg_data_high,8,uhex
+;**************************************************************************
+
+parallax	=	1
+sx_28l		=	1
+selftest	=	0				; test by reading registers with distinctive value
+							; like chip revisions
+;**************************************************************************
+; Device Directives
+;**************************************************************************
+if sx_28l and parallax
+		device	SX28L,OSCXT4
+		device	turbo,STACKX_OPTIONX
+else
+		device	pins28,pages4,banks8,oschs
+		device	turbo,stackx,optionx
+endif
+		id	'Codectst'
+		reset	reset_entry
+if parallax
+		freq	50_000_000
+endif
+
+;**************************************************************************
+; Equates for DTMF rates when called at a frequency of 8.192kHz
+; The constant = 0x10000 / (8000 / FREQ), where the resultant upper byte =
+; an index into a sine table.
+; Therefore, constant = 8.192 * FREQ
+;**************************************************************************
+
+	f697_h		equ	$16	; DTMF Frequency
+	f697_l		equ	$4d
+
+	f770_h		equ	$18	; DTMF Frequency
+	f770_l		equ	$a3
+
+	f852_h		equ	$1b	; DTMF Frequency
+	f852_l		equ	$43
+
+	f941_h		equ	$1e	; DTMF Frequency
+	f941_l		equ	$1c
+
+	f1209_h		equ	$26	; DTMF Frequency
+	f1209_l		equ	$b0
+
+	f1336_h		equ	$2a	; DTMF Frequency
+	f1336_l		equ	$c0
+
+	f1477_h		equ	$2f	; DTMF Frequency
+	f1477_l		equ	$43
+
+	f1633_h		equ	$34	; DTMF Frequency
+	f1633_l		equ	$41
+
+;**************************************************************************
+; Other Equates
+;**************************************************************************
+	low_th_h	equ	$07	; The threshold a low frequency needs
+	low_th_l	equ	$00	; to surpass to be considered valid
+	high_th_h	equ	$07	; The threshold a high frequency needs
+	high_th_l	equ	$00	; to surpass to be considered valid
+	low_samples	equ	105	; The number of samples to take to detect a low frequency
+	high_samples	equ	105	; The number of samples to take to detect a high frequency
+;**************************************************************************
+;**************************************************************************
+; Pin Definitions
+;**************************************************************************
+
+	sdo		=	rb.7			; Serial Data Out (of the 3032 IC)
+	sclk		=	rb.5			; Serial Clock
+	fsync_bit	equ	6
+		fsync		=	rb.fsync_bit
+							; Frame Sync Output/Input (Master/Slave)
+							; Data framing signal that is used to 
+							; indicate the start and stop of a communication
+							; frame
+	sdi		=	rb.4			; Serial Data In (to the 3032 IC)
+	rx_pin          EQU     ra.2                    ;UART receive input
+	tx_pin          EQU     ra.3                    ;UART transmit output
+	trigger		equ	rb.0
+
+;**************************************************************************
+; Global Registers
+;**************************************************************************
+	org	$8
+
+	sample_lows_bit	equ	2	; this bit of the flags register determines whether or not to sample the high or low frequencies
+
+	flags		ds	1
+		rx_flag		equ	flags.0			; Indicates when a byte has been received by the UART
+		irq_flag	equ	flags.1			; Indicates when an interrupt has occurred
+		sample_lows	equ	flags.sample_lows_bit	; See above
+		ref_sign	equ	flags.3			; The sign bit for the sine/cosine reference
+		input_sign	equ	flags.4			; The sign for the input data
+		new_data_flag	equ	flags.5			; A flag indicating when new data has arrived
+		serial_in_sign	equ	flags.6
+	temp1		ds	1	; temp1 is used to store the pointer to the bank of data to operate on.
+	temp2		ds	1	; temp2 is a temporary operations register
+	temp3		ds	1	; temp3 is a temporary register
+	save_mode	ds	1	; use this register to save the mode register
+	ulawbyte	ds	1	; re-use temp1 to store the ulawbyte
+	in_byte		equ	ulawbyte
+
+	flag_2880_bit		equ	2
+	flag_2048_bit		equ	3
+	flag_200_bit		equ	4
+
+	flags2		ds	1		; definition of the bits in the flag		
+
+		codec_interface_en	equ	flags2.0
+		flag_2880		equ	flags2.flag_2880_bit
+		flag_2048		equ	flags2.flag_2048_bit
+		flag_200		equ	flags2.flag_200_bit
+		timer_flag		equ	flags2.7
+
+;*********************************************************
+	org	$10
+;*********************************************************
+serial		=       $		;UART bank
+
+	bit_count	ds	1
+
+	data_in_low	ds	1
+	data_in_high	ds	1
+
+	data_out_low	ds	1
+	data_out_high	ds	1
+
+	reg_data_low	ds	1
+	reg_data_high	ds	1
+
+	timers	=	$
+	timer_l		ds	1
+	timer_h		ds	1
+
+;*********************************************************
+	org	$30
+;*********************************************************
+;*********************************************************
+	org	$50
+;*********************************************************
+;*********************************************************
+	org	$70
+;*********************************************************
+;*********************************************************
+	org	$90
+;*********************************************************
+;*********************************************************
+	org	$b0
+;*********************************************************
+;*********************************************************
+	org	$d0
+;*********************************************************
+;*********************************************************
+	org	$f0
+;*********************************************************
+	
+;**************************************************************************
+; Macros
+;**************************************************************************
+CLEAR_PENDING	macro	0
+	mov	m,#$09
+	clr	w
+	mov	!rb,w
+	endm
+
+ENABLE_FSYNC_INT macro	0
+	mov	m,#$0b			; WKEN_B
+	mov 	!rb, #%10111111		; enable interrupt on FSYNC
+	endm
+
+DISABLE_FSYNC_INT macro	0
+	mov	m,#$0b			; WKEN_B
+	mov 	!rb, #%11111111		; enable interrupt on FSYNC
+	endm
+
+ENABLE_RTCC_INT macro	0
+	mov 	!option, #%00011111	; enable interrupt on RTCC
+	endm
+
+DISABLE_RTCC_INT macro	0
+	mov 	!option, #%01011111	; enable interrupt on RTCC
+	endm
+
+DISABLE_INTS macro 0
+	mov	m,#$0b			; WKEN_B
+	mov 	!rb, #%11111111		; disable interrupt on FSYNC
+	mov	!option,#%01011111	; disable RTCC interrupt and enable wreg
+	endm
+
+
+		org	0
+;**************************************************************************
+; Interrupt Service Routine
+;
+;**************************************************************************
+
+interrupt	
+	;*********************************************************
+	; First decide what to do on this interrupt.  If we are
+	; in one of the other "fast" clock modes, then perform
+	; the ISR for those.  (The "fast" clock modes are only
+	; enabled while the SiLabs part is being initialized)
+	;*********************************************************
+					;5
+	sb	codec_interface_en	;1
+	jmp	codec_interface_out	;1					
+	;****************************************************************************
+	; Decide which clock speed we are running at.
+	;****************************************************************************
+	bank	serial			;1,8
+	jb	flag_2880,sclk_2880	;2, 4--> sclk_2880
+	jb	flag_2048,sclk_2048	;2, 4--> sclk_2048
+	jb	flag_200,sclk_200	;2, 4--> sclk_200
+	jmp	codec_interface_out	;3
+					;if none of the flags are set, then exit
+
+
+						; clk cycle	total
+;**************************************************************************
+sclk_2880					
+; At 2.88MHz, this is the timing of the interface:
+;			   <Tsclk>	
+;	SCLK	 	___---___---___---___---___---__ ... _---___---___---
+; 	FSYNC (mode 1)	___------_______________________ ... _______---------
+;			   <347+174>
+;
+; since last FSYNC, rtcc has been disabled, so this interrupt must be caused by a new FSYNC
+; remember that Fsclk=2.88 MHz, Tsclk=347 ns~= 17 clk cycles 
+; half cycle = 173.5 ns ~= 8 clk cycles
+; 100 ns already spent as interrupt latency at 50MHz (ext. int. vs. 60ns for RTCC int)
+; ~12.5 (250ns) clk cycles passed at this point, including 10 ns for detecting rising edge of FSYNC
+;**************************************************************************
+		mov	bit_count,#16	;2,14 cycles @ 50MHz = 	290ns
+		mov	m,#$09		;1
+		clr	w		;1
+		mov	!rb,w		;1
+		clr	data_in_high	;1
+		clr	data_in_low	;1
+	
+						;19 cycles at this point
+
+
+		; since we have passed the half cycle time of 8 clk cycles, sclk must be low now
+		; wait for rising edge to send sdi
+		; read sdo on falling edge since the 3032 sent it on rising edge, it must be valid by the falling edge
+
+		; rising edge of sclk arrived
+		; sclk=1, output sdi
+			    
+		; the following loop has 17 cycles=340 ns
+:out_sdi						
+		rl	data_out_low		; 1		20
+		rl	data_out_high		; 1		21	
+		sc				; 1		22
+		clrb	sdi			; 1		23=410 ns if clear
+		snc				; 1		24
+		setb	sdi			; 1		25=450 ns
+		nop				; 1
+		nop				; 1
+
+		clc				; 1
+		snb	sdo			; 1 skip if sdo=0.
+		stc				; 1 no skip, then sdo=1
+		rl	data_in_low		; 1
+		rl	data_in_high		; 1
+	
+		djnz	bit_count,:out_sdi		; 4
+		setb	new_data_flag		; set the new data flag to indicate the new data.
+		jmp	codec_interface_out
+;**************************************************************************
+sclk_2048	; here for SCLK=2.048 MHz				
+; At 2.048MHz, this is the timing of the interface:
+;			   <Tsclk>	
+;	SCLK	 	___---___---___---___---___---__ ... _---___---___---
+; 	FSYNC (mode 1)	___------_______________________ ... _______---------
+;			   <488+244>
+;
+; since last FSYNC, rtcc has been disabled, so this interrupt must be caused by a new FSYNC
+; remember that Fsclk=2.048 MHz, Tsclk=488 ns~= 24 clk cycles 
+; half cycle = 244 ns ~= 12 clk cycles
+; 100 ns already spent as interrupt latency at 50MHz (ext. int. vs. 60ns for RTCC int)
+; ~14.5 (290ns) clk cycles passed at this point, including 10 ns for detecting rising edge of FSYNC
+;**************************************************************************
+;						;14 cycles here
+		mov	bit_count,#16		;2,16 cycles, 320ns +10ns = 330ns
+
+		clr	data_in_high		;17
+		clr	data_in_low		;18
+		clc				;19
+		nop				;20
+		nop				;21
+		nop				;22
+		nop				;23
+		nop				;24
+		nop				;25
+		nop				;26	 26 cycles at this point
+		
+
+				
+		; the following loop should have 488 ns~=24 cycles	
+:out_sdi					 		
+		clc				;1 This should be the 27th cycle
+		rl	data_out_low		;1		
+		rl	data_out_high		;1			
+		sc				;1		
+		clrb	sdi			;1		
+		snc				;1		
+		setb	sdi			;1, 7	
+	
+		nop				;1
+		nop				;1
+		nop				;1
+		nop				;1
+		nop				;1
+		nop				;1
+		nop				;1
+		nop				;1, 15
+		
+		clc				;1
+		snb	sdo			;1 skip if sdo=0.
+		stc				;1 no skip, then sdo=1
+		rl	data_in_low		;1
+		rl	data_in_high		;1, 20
+	
+		djnz	bit_count,:out_sdi		;4, 24
+		; end of bit_count
+	
+		setb	new_data_flag		; set the new data flag to indicate the new data.
+		jmp	codec_interface_out		
+;**************************************************************************
+sclk_200	; here for SCLK=200kHz	
+;			   <Tsclk>
+;	count		         16    15    14    13         2     1    -->0
+;	SX Operation	         W  R  W  R  W  R  W  R       W  R  W  R
+;	SCLK	 	___---___---___---___---___---__ ... _---___---___---
+; 	FSYNC (mode 1)	___------_______________________ ... _______---------
+;			   |--- This rising edge triggers the initial interrupt
+;				Output data on the rising edges of the clock
+;				and input data on the falling edges.  200kHz
+;				is slow enough that a synchronouse algorithm
+;				will work.
+;**************************************************************************
+							; It doesn't really matter how many cycles have passed at this point.
+							; because the 200kHz clock is so slow.
+		mov	bit_count,#16			;2
+		jb	fsync,$				; wait until fsync goes low.
+:loop
+
+:output_sdi	clc
+		rl	data_out_low			; output the output data
+		rl	data_out_high
+		sc
+		clrb	sdi
+		snc
+		setb	sdi
+
+		jb	sclk,$				; wait for clock to go low
+
+:read_sdo	clc					; read the input data
+		snb	sdo
+		stc
+		rl	data_in_low
+		rl	data_in_high
+
+		jnb	sclk,$				; wait for clock to go high and go back to start
+		decsz	bit_count				; do 16 times
+		jmp	:loop
+		setb	new_data_flag
+		jmp	codec_interface_out
+;**************************************************************************
+codec_interface_out
+		mov	save_mode,m
+		CLEAR_PENDING
+		mov	m,save_mode
+		clrb	sdi
+;**************************************************************************
+do_timers
+		bank	timers
+		inc	timer_l
+		snz
+		inc	timer_h
+		snz
+		setb	timer_flag
+;**************************************************************************
+; Put any other VP's here.  The VP's will run at the input clock frequency
+; of 8kHz
+;**************************************************************************
+isr_out
+		; other VP's
+	reti
+;**************************************************************************
+; END OF INTERRUPT SERVICE ROUTINE
+;**************************************************************************
+
+
+
+
+;**************************************************************************
+;* 				Main 
+;**************************************************************************
+reset_entry	
+		call	@init			; Initialize the SX
+		call	@initialize_codec	; Initialize the codec
+;**************************************************************************
+		call	@get_ring		; get a ring signal
+		call	@go_off_hook		; go off-hook
+		
+;**************************************************************************
+
+:test_loop	mov     w,#6                    ; read register DAA control 2
+	        call    @read_reg                ; result should be 70 hex
+		mov	w,#$60
+		xor	w,reg_data_low
+		jnz	:test_loop
+		break
+	
+		jmp	$
+;**************************************************************************
+org	$200
+;**************************************************************************
+; MISCELLANEOUS SUBROUTINES
+;**************************************************************************
+;**************************************************************************
+init
+;**************************************************************************
+		call	zero_ram
+		bank	serial
+		mov	m,#$0a
+		mov	!rb,#%10111111
+		mov	m,#$0c
+		mov	!rb,#%10111111		; enable Schmidtt triggers on fsync
+		mov	m,#$0d
+		mov	!ra,#$00
+		mov	!rb,#$00
+		mov	!rc,#$00		; enable CMOS levels on all inputs
+		mov	m,#$0e
+		mov	!rb,#$ff		; enable pullup resistors on RB4-RB7
+		mov	m,#$0f			; setup data direction
+		mov	 rb,#%11101111		;init rb
+		mov	!rb,#%11100000		; only SDI is output on RB7
+		DISABLE_INTS
+		mov	m,#$0f			; point back to ports
+		clr	flags2
+		retp
+;**************************************************************************
+zero_ram
+; Subroutine - Zero all ram.
+; INPUTS:	None
+; OUTPUTS:	All ram locations (except special function registers) are = 0
+;**************************************************************************
+		CLR	FSR
+:loop	    	SB      FSR.4                   ;are we on low half of bank?
+		SETB    FSR.3                   ;If so, don't touch regs 0-7
+		CLR     IND                     ;clear using indirect addressing
+		IJNZ    FSR,:loop	        ;repeat until done
+		retp
+;**************************************************************************
+read_reg_200kHz
+;**************************************************************************
+		bank	serial
+		or	w,#%00100000
+		mov	reg_data_high,w
+		clr	reg_data_low
+		clrb	codec_interface_en			; disable the codec interface
+		clrb	flag_2880
+		clrb	flag_2048
+		setb	flag_200				; enable 200kHz data transfer
+		CLEAR_PENDING					; clear the pending register because 200kHz is the first
+								; mode of data transfer and it might be set by now.
+		ENABLE_FSYNC_INT
+
+		jmp	write_reg2				; reg_data_high is already loaded by write_reg_200kHz
+
+;**************************************************************************
+write_reg_200kHz
+; subroutine to write data to DAA at 200kHz
+; data	= reg_data_low
+; reg. no.= w
+; exit: data written into register
+;**************************************************************************
+		bank	serial
+		mov	reg_data_high,w				; register number
+		clrb	codec_interface_en			; disable the codec interface
+		clrb	flag_2880
+		clrb	flag_2048
+		setb	flag_200				; enable 200kHz data transfer
+		CLEAR_PENDING					; clear the pending register because 200kHz is the first
+								; mode of data transfer and it might be set by now.
+		ENABLE_FSYNC_INT
+
+		jmp	write_reg2				; reg_data_high is already loaded by write_reg_200kHz
+								; so don't load it again.
+;**************************************************************************
+write_reg_2048kHz
+; subroutine to write data to DAA at 2.048MHz
+; data	= reg_data_low
+; reg. no.= w
+; exit: data written into register
+;**************************************************************************
+		bank	serial
+		clrb	flag_2880
+		clrb	flag_200				; enable 2048kHz data transfer
+		setb	flag_2048
+
+		jmp	write_reg
+;**************************************************************************
+write_reg_2880kHz
+; subroutine to write data to DAA at 2.880MHz
+; data	= reg_data_low
+; reg. no.= w
+; exit: data written into register
+;**************************************************************************
+		bank	serial
+		clrb	flag_2048
+		clrb	flag_200				; enable 200kHz data transfer
+		setb	flag_2880
+
+		jmp	write_reg
+;**************************************************************************
+write_reg
+; subroutine for writing data to the DAA.  Do not call directly.
+; call one of the speed write_reg routines, like write_reg_200kHz.
+;**************************************************************************
+
+; request secondary frame update
+		mov	reg_data_high,w				; register number
+write_reg2							; reg_data_high is already loaded by write_reg_200kHz
+		mov	data_out_low,#$01
+		mov	data_out_high,#$00
+		clrb	new_data_flag				; clear the new_data_flag
+		setb	codec_interface_en
+		jnb	new_data_flag,$				; wait for the data to be transferred
+
+		clrb	new_data_flag
+		mov	data_out_low, reg_data_low		; register data
+		mov	data_out_high,reg_data_high		; register number
+				
+		jnb	new_data_flag,$				; wait until the transfer is finished
+		clrb	new_data_flag
+		retp						; and return
+
+		;enter: w	= register to read
+		; exit: data_in  = returned value
+
+;**************************************************************************
+read_reg
+; subroutine to read data from DAA register at 2.048MHz
+; data	= reg_data_low
+; reg. no.= w
+; exit: data written into register
+;**************************************************************************
+	bank	serial
+	clrb	flag_200
+	clrb	flag_2880
+	setb	flag_2048				; enable 2.048MHz data transfer
+
+	mov	reg_data_high,w
+	or	reg_data_high,#%00100000
+
+							; request secondary frame update
+	mov	data_out_low,#$01
+	mov	data_out_high,#$00
+
+	clrb	new_data_flag
+	jnb	new_data_flag,$				; wait until data transfer is finished
+
+	clr	data_out_low
+	mov	data_out_high,reg_data_high
+
+	clrb	new_data_flag				; wait until data transfer is finished
+	jnb	new_data_flag,$
+
+	mov	reg_data_low,data_in_low		; get the received data
+	clr	reg_data_high				; this byte is invalid because register read only returns
+							; one byte
+	retp
+;**************************************************************************
+sync_to_fsync				; ensure that an FSYNC interrupt 
+					; doesn't occur at a critical part of
+					; some calculations
+;**************************************************************************
+	DISABLE_FSYNC_INT
+	jb	fsync,$			; wait while fsync is high
+	jnb	fsync,$			; wait while fsync is low
+	jb	fsync,$			; wait while fsync is high
+	CLEAR_PENDING
+	ENABLE_FSYNC_INT
+
+	retp
+;**************************************************************************
+initialize_codec
+;
+; MCLK= 4.000MHz
+;
+; Fbase= Fmclk*M1*16/(N1* 25)= 4 MHz*72*16/(5*25)=36.864 MHz, CGM=1
+; N1=5, M1=72, CGM=1
+; N2=9, M2=10	->  Fs=8KHz
+; values to be written should be 1 less than value listed
+; in the exact sequence shown below
+; reg. 7=N1=4
+; reg. 8=M1=71
+; reg. 10=cgm=1
+; reg. 9= N2|M2=8|9= 1000 1001
+;**************************************************************************
+:ensure_valid					; first check that the codec is initialized properly
+		call	sync_to_fsync		; by reading a register at 200kHz.
+		bank	serial
+		mov     w,#6                    ; read register DAA control 2
+	        call    read_reg_200kHz         ; result should be 70 hex
+		mov	w,#$70
+		xor	w,data_in_low
+		jnz	:ensure_valid		; if the read does not return a valid result, then do again.
+		mov	reg_data_low,#4		;N1
+		mov	w,#7
+		call	write_reg_200kHz
+
+		mov	reg_data_low,#71	; Set up the M1 register.
+		mov	w,#8
+		call	write_reg_200kHz
+:loop4
+		call	sync_to_fsync		; sync to an FSYNC pulse
+
+		mov	reg_data_low,#1	; cgm
+		mov	w,#10
+		call	write_reg_2880kHz
+
+		call	sync_to_fsync		; sync up to an FSYNC pulse
+
+		mov	reg_data_low,#$89	; Set up the N2 and M2 registers
+		mov	w,#9
+		call	write_reg_2880kHz
+	
+		call	sync_to_fsync		; sync up to an FSYNC pulse
+
+						; ready to switch to normal operation
+						; write #$60 to register 6
+		mov	reg_data_low,#$60
+		mov	w,#6
+		call	write_reg_2048kHz
+
+
+isolink_loop					; wait for ISOlink to be established
+		mov	w,#12
+		call	read_reg
+
+		sb	reg_data_low.6		; ISOlink frame detected?
+		jmp	isolink_loop
+
+		retp				; Return when ISOlink frame detected.
+;**************************************************************************
+get_ring
+; detect ring.
+; read ring detect bit from register 5, bit 2
+; return when a ring is detected
+;**************************************************************************
+ring_loop	mov	w,#5
+		call	read_reg
+		sb   	reg_data_low.2		; loop until ring detected
+		jmp	ring_loop
+		retp	
+;**************************************************************************
+go_off_hook
+; now go off hook
+;**************************************************************************
+		
+		or	reg_data_low,#%00000001
+		mov	w,#5
+		call	write_reg_2048kHz
+		retp
+;**************************************************************************
+
+org	$400
+;**************************************************************************
+

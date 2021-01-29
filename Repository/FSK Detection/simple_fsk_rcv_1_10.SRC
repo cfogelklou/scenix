@@ -1,0 +1,847 @@
+;*****************************************************************************************
+; Copyright © [01/26/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+; 
+; Filename:	simple_fsk_rcv_1_10.src
+;
+; Authors:	Chris Fogelklou
+;		Applications Engineer
+;		Scenix, Inc.
+;
+; Revision:	1.10
+;
+; Part:		SX28AC datecode 9929AA
+;
+; Freq:		50Mhz
+;
+; Compiled using Parallax SX-Key software v1.07 and SASM 1.40
+;
+; Date Written: January 25, 1999
+;
+; Last Revised: November 17, 1999
+;
+; Program Description:	This is simple software to demonstrate the concept of 
+;			converting an incoming frequency to a data train.  This 
+;			program simply watches the incoming frequency and outputs
+;			a high or a low to the RS-232 TX pin.  For this reason, the
+;			PC that the board is connected to must be set to the desired
+;			baud rate.  Example:  If a 300,N,8,1 settings are desired, 
+;			simply set the PC's terminal program to these settings and
+;			the SX modem will act as a simple frequency-voltage converter,
+;			translating the incoming frequency (1300Hz and 2100Hz) to 
+;			an output voltage which the computer will receive as a 300,N,8,1
+;			data packet.  Once the modem is connected, simply press a key
+;			on the keyboard to get it to pick up and begin receiving.
+;
+;			Disclaimer:  	This program is simplified...  It is just
+;					for demo purposes, to show the power and 
+;					simplicity of Virtual Peripherals for telephony
+;					applications.  An actual modem would need a 
+;					more complex algorithm (See the V.23 Modem Appnote)
+;					to achieve sufficient error response.
+;
+;			Note:		This program works only with an accurate Oscillator.
+;					The SX-ISD's Oscillator is not accurate enough to
+;					produce error-free results.  The XTAL on the Scenix
+;					Demo boards produced better results.
+;
+;	INPUTS:
+;	FSK input on fsk_rx_pin (rb.1) (Signal must be passed through comparator/zero-cross
+;					circuitry.)
+;	RS-232 input on rx_pin (ra.1)
+;
+;	OUTPUTS:
+;	Received RS-232 characters on tx_pin (ra.2)
+;	LED flashes while receiving on led_pin (rb.0)
+;
+; Revision History:  	1.0  Drew out the FSK receive code from the rest of the code
+;		 	surrounding it in the old modem demo software and implemented
+;			it as a module by itself (December 17, 1998)
+;			1.01 Added more documentation to the software for web-posting.
+;			(January 25, 1999)
+;			1.02 Added support for rev 1.4 boards (2/23/99)
+;			1.10 Updated the program for the SASM assembler
+;
+;	RESOURCES:
+;       Program memory: 91 Words
+;       Data memory:	2 1/8 bytes
+;*****************************************************************************************
+
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+SX28
+;SX48_52
+;SX48_52_ES
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+;SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52				;SX48/52/BD device directives for SX-Key
+		device	oschs2,stackx_optionx
+    ENDIF
+  ENDIF
+		freq	50_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs2,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs2,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs2,stackx,optionx   
+    ENDIF
+  ENDIF
+ENDIF
+		id	'SFSKRX11'			;
+		reset	reset_entry		; set reset vector
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+_bank	macro	1
+	bank	\1
+
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+	    ELSE
+		clrb	fsr.7
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+	IFDEF SX48_52
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+	ELSE
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+	ENDIF
+	endm
+
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+		org     global_org
+
+function_temp	equ	global_org+1
+global_temp	equ	global_org+2
+
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+bank0		=	$
+
+flags			ds	1
+	fsk_rx_en	equ	flags.0 ; Enables the FSK receiver.
+
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+bank1		=	$
+
+fsk_receive_bank	=	$
+
+fsk_trans_count	ds	1		; This register counts the number of counts 
+						; between transitions at the pin
+rb_past_state	ds	1		; This register keeps track of the previous 
+						; state of port RB, to watch for transitions
+
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+
+
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+bank3		=	$
+
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+
+bank4		=	$
+
+
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+
+bank5		=	$
+
+
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+
+bank6		=	$
+
+
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+
+bank7		=	$
+
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+
+bank8		=	$
+
+
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+
+bank9		=	$
+
+
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+
+bankA		=	$
+
+
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+
+bankB		=	$
+
+
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+
+bankC		=	$
+
+
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+
+bankD		=	$
+
+
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+
+bankE		=	$
+
+
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+
+bankF		=	$
+
+
+ENDIF
+
+;*********************************************************************************
+; Pin Definitions	(These pins are for use with the Scenix Modem Demo Board,
+;			 Rev. 1.2)
+;*********************************************************************************
+PDM_pin		equ	ra.0	; D/A output pin
+rx_pin		equ	ra.1	; RS-232 reception pin
+tx_pin		equ	ra.2	; RS-232 transmission pin
+nothing		equ	ra.3	; N/C
+RA_latch	equ	%11111111		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11111011		;SX18/20/28/48/52 port A DDIR value
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%11111111		;SX18/20/28/48/52 port A PLP value
+
+led_pin		equ	rb.0	; LED pin
+rxa_pin		equ	rb.1	; FSK receive pin
+cntrl_1		equ	rb.2	; drive cntrl_1 low to disable the output of the LPF
+ring		equ	rb.3	; ring detection pin
+hook		equ	rb.4	; drive hook low to go off-hook
+cntrl_3		equ	rb.5	; drive cntrl_3 low to disable the output of the HPF
+rts		equ	rb.6	; indicates to the SX that the PC wants to transmit data
+cts		equ	rb.7	; indicates to the PC that the SX is ready to receive data
+RB_latch	equ	%11011011		;SX18/20/28/48/52 port B latch init
+RB_DDIR		equ	%01101010		;SX18/20/28/48/52 port B DDIR value
+RB_ST		equ	%11111111		;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111		;SX18/20/28/48/52 port B PLP value
+
+dtmf_in_pin	equ	rc.0	; DTMF input pin
+dtmf_fdbk_pin	equ	rc.1	; Negative feedback output for DTMF input
+AtoD_in_pin	equ	rc.2	; A/D input pin
+AtoD_fdbk_pin	equ	rc.3	; Negative feedback for A/D input
+imp_450_pin	equ	rc.4	; Set to an output to set hybrid for 450ohm line impedance.  Tristate otherwise.
+imp_600_pin	equ	rc.5	; Set to an output to set hybrid for 600ohm line impedance.  Tristate otherwise.
+imp_750_pin	equ	rc.6	; Set to an output to set hybrid for 750ohm line impedance.  Tristate otherwise.
+imp_900_pin	equ	rc.7	; Set to an output to set hybrid for 900ohm line impedance.  Tristate otherwise.
+RC_latch	equ	%00001111		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%11010101		;SX18/20/28/48/52 port C DDIR value
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+
+IFDEF SX48_52	;SX48BD/52BD Port initialization values
+RD_latch	equ	%00000000		;SX48/52 port D latch init
+RD_DDIR		equ	%11111111		;SX48/52 port D DDIR value
+RD_ST		equ	%11111111		;SX48/52 port D ST value
+RD_LVL		equ	%00000000		;SX48/52 port D LVL value
+RD_PLP		equ	%11111111		;SX48/52 port D PLP value
+
+RE_latch	equ	%00000000		;SX48/52 port E latch init
+RE_DDIR		equ	%11111111		;SX48/52 port E DDIR value
+RE_ST		equ	%11111111		;SX48/52 port E ST value
+RE_LVL		equ	%00000000		;SX48/52 port E LVL value
+RE_PLP		equ	%11111111		;SX48/52 port E PLP value
+ENDIF
+
+
+;*****************************************************************************************
+; Program constants
+;*****************************************************************************************
+;******************************************************************************
+; Equates for FSK reception
+;******************************************************************************
+glitch_th		equ	20	; The threshold which defines a glitch (small spike which should be ignored)
+low_count_error_th	equ	40	; The lowest count allowed for a high frequency
+low_high_th		equ	95	; The lowest count allowed for a low frequency
+high_count_error_th	equ	140	; The highest count allowed for a low frequency
+
+
+int_period	equ	163		;RTCC Interrupt rate
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; SX48BD/52BD Mode addresses
+	; *On SX48BD/52BD, most registers addressed via mode are read and write, with the
+	; exception of CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Timer (read) addresses
+TCPL_R		equ	$02		;Read Timer Capture register low byte
+TCPH_R		equ	$02		;Read Timer Capture register high byte
+TR2CML_R	equ	$02		;Read Timer R2 low byte
+TR2CMH_R	equ	$03		;Read Timer R2 high byte
+TR1CML_R	equ	$04		;Read Timer R1 low byte
+TR1CMH_R	equ	$05 		;Read Timer R1 high byte
+TCNTB_R		equ	$06		;Read Timer control register B
+TCNTA_R		equ	$07		;Read Timer control register A
+
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_R		equ	$0A		;Read MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_R		equ	$0B		;Read MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_R		equ	$0C		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_R		equ	$0D		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_R		equ	$0E		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_R		equ	$0F		;Read Port Direction
+
+; Timer (write) addresses
+TR2CML_W	equ	$12		;Write Timer R2 low byte
+TR2CMH_W	equ	$13		;Write Timer R2 high byte
+TR1CML_W	equ	$14		;Write Timer R1 low byte
+TR1CMH_W	equ	$15 		;Write Timer R1 high byte
+TCNTB_W		equ	$16		;Write Timer control register B
+TCNTA_W		equ	$17		;Write Timer control register A
+
+; Port setup (write) addresses
+WKED_W		equ	$1A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$1B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$1C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$1D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$1E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$1F		;Write Port Direction
+
+ELSE
+
+	;*********************************************************************************
+	; SX18AC/20AC/28AC Mode addresses
+	; *On SX18/20/28, all registers addressed via mode are write only, with the exception of
+	; CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_W		equ	$0A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$0B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$0C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$0D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$0E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$0F		;Write Port Direction
+ENDIF
+
+;*****************************************************************************************
+; Interrupt Service Routine
+;*****************************************************************************************
+; Note: The interrupt code must always originate at address $0.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;*****************************************************************************************
+		org     $0
+interrupt					;3
+
+	;*********************************************************************************
+	; Virtual Peripheral: FSK Detection (Simple)
+	;
+	;
+	;	Input variable(s):  	fsk_rx_en:  Enables/Disables this routine
+	;				RB.1:	FSK Input on this port pin.
+	;	Output variable(s): 	Sets/Clears the LED_pin and the tx_pin, depending on
+	;				the current input frequency
+	;	Variable(s) affected: 	fsk_trans_count, rb_past_state
+	;	Flag(s) affected: 	None
+	;	Variable Length?:	Yes.
+	;*********************************************************************************
+		jnb	fsk_rx_en,fsk_rx_out	; jump out if the FSK receiver is not enabled
+
+FSK_RECEIVE
+		bank	fsk_receive_bank	; switch to fsk_receive_bank of RAM
+
+		add	fsk_trans_count,#1	; Regardless of what is going on, increment the 
+		snc				; transition timer.  These get cleared when a transition 
+		jmp	:error			; takes place.
+
+		cjb	fsk_trans_count,#low_high_th,:fsk_timer_out	; as soon as it takes longer than 95 counts
+		setb	tx_pin						; to transition, this must be a low frequency
+		clrb	LED_pin						; If a high is being sent, clear the LED
+		
+:fsk_timer_out
+
+		mov	w,rb
+		and	w,#%00000010		; get the current state of rb.
+		xor	w,rb_past_state		; compare it with the previous state of the pin
+		jz	fsk_rx_out		; if there was no change, then jump out, there is nothing to do.
+		
+						; Now it is time to determine if the transition that took place indicates a bit was received
+						; (it must be within some thresholds... below 20, ignore it, below 40, what???,
+						; below 95, high frequency, below 140, low frequency (already set), above 140,
+						; what???)
+
+		cjb	fsk_trans_count,#glitch_th,:glitch_so_ignore		; pulse was below specs, ignore it... probably noise
+		cjb	fsk_trans_count,#low_count_error_th,:error		; pulse was not a glitch but wasn't long enough to mean anything... huh?
+		cjb	fsk_trans_count,#low_high_th,:high_frequency		; pulse was within specs for a high frequency...
+		cjb	fsk_trans_count,#high_count_error_th,:fsk_receive_done	; pulse was within specs for a low frequency (don't do anything)
+		jmp	:error							; pulse was too long to mean anything, so do nothing.
+		
+:high_frequency						; a high frequency corresponds to low data.
+		clrb	tx_pin
+		setb	LED_pin				; set the LED to indicate a LOW is being sent.
+		jmp	:fsk_receive_done
+
+:error
+;--------------- PUT ERROR HANDLING CODE IN HERE -----------------
+
+:fsk_receive_done			
+		clr	fsk_trans_count			; clear the bit counter.
+:glitch_so_ignore					; don't clear the counter if the data was a glitch
+		mov	w,rb				; save the new state of RB.
+		and	w,#%00000010
+		mov	rb_past_state,w
+fsk_rx_out
+
+	;*********************************************************************************
+	; Set Interrupt Rate
+	;*********************************************************************************
+isr_end		mov	w,#-int_period		;refresh RTCC on return
+		retiw				;return from the interrupt
+						; = 1/(int_period*RTCC prescaler*1/50MHz)
+						; = 1/(163*1*20ns) = 1/3.26us = 306.7kHz
+;*****************************************************************************************
+; End of the Interrupt Service Routine
+;*****************************************************************************************
+
+;*****************************************************************************************
+; RESET VECTOR 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Program execution begins here on power-up or after a reset
+	;*********************************************************************************
+reset_entry	jmp	@_reset_entry	; Go to the location in the last page where the
+					; main program is.
+
+
+
+;*****************************************************************************************
+org	$200
+;*****************************************************************************************
+; Jump table for page 1
+; Enables CALLs to functions in the second half of the page 
+;*****************************************************************************************
+;function_label_2	jmp	function_label_2_
+
+;*****************************************************************************************
+; Subroutines
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Function: 
+	; 
+	; Inputs:
+	;	
+	; Outputs:
+	;	
+	; Registers affected:
+	;
+	; Functions Called:
+	;
+	;*********************************************************************************
+;function_label
+
+;		retp
+
+	;*********************************************************************************
+	; Function: 
+	; 
+	; Inputs:
+	;	
+	; Outputs:
+	;	
+	; Registers affected:
+	;
+	; Functions Called:
+	;
+	;*********************************************************************************
+;function_label_1
+
+;		retp
+
+	;*********************************************************************************
+	; Function: 
+	; 
+	; Inputs:
+	;	
+	; Outputs:
+	;	
+	; Registers affected:
+	;
+	; Functions Called:
+	;
+	;*********************************************************************************
+;function_label_2_
+
+;		retp
+
+;*****************************************************************************************
+org	$400
+;*****************************************************************************************
+;*****************************************************************************************
+org	$600
+;*****************************************************************************************
+;*****************************************************************************************
+; RESET VECTOR 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Program execution begins here on power-up or after a reset
+	;*********************************************************************************
+_reset_entry
+	;*********************************************************************************
+	; Initialise all port configuration
+	;*********************************************************************************
+
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_ST            	;Setup RD Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_ST            	;Setup RE Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_LVL            	;Setup RD CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rd,w		
+		mov     w,#RE_LVL            	;Setup RE CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!re,w		
+ENDIF
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_PLP            	;Setup RD Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_PLP            	;Setup RE Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+IFDEF SX48_52
+		mov	w,#RD_DDIR		;Setup RD Direction register, 0 = output, 1 = input
+		mov	!rd,w			
+		mov	w,#RE_DDIR		;Setup RE Direction register, 0 = output, 1 = input
+		mov	!re,w			
+ENDIF
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+IFDEF SX48_52
+		mov     w,#RD_latch         	;Initialize RD data latch
+		mov     rd,w			
+		mov     w,#RE_latch         	;Initialize RE data latch
+		mov     re,w			
+ENDIF
+
+
+	;*********************************************************************************
+	; Clear all Data RAM locations
+	;*********************************************************************************
+IFDEF SX48_52   				;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zero_ram	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+
+		_bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+ELSE     					;SX18/20/28 RAM clear routine
+		clr	fsr			;reset all ram banks
+:zero_ram	sb	fsr.4			;are we on low half of bank?
+		setb	fsr.3			;If so, don't touch regs 0-7
+		clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zero_ram
+ENDIF
+	;*********************************************************************************
+	; Initialize program/VP registers
+	;*********************************************************************************
+
+
+	;*********************************************************************************
+	; Setup and enable RTCC interrupt, WREG register, RTCC/WDT prescaler
+	;*********************************************************************************
+
+RTCC_ON		=	%10000000	;Enables RTCC at address $01 (RTW hi)
+					;*WREG at address $01 (RTW lo) by default
+RTCC_ID		=	%01000000	;Disables RTCC edge interrupt (RTE_IE hi)
+					;*RTCC edge interrupt (RTE_IE lo) enabled by default
+RTCC_INC_EXT	=	%00100000	;Sets RTCC increment on RTCC pin transition (RTS hi)
+					;*RTCC increment on internal instruction (RTS lo) is default
+RTCC_FE		=	%00010000	;Sets RTCC to increment on falling edge (RTE_ES hi)
+					;*RTCC to increment on rising edge (RTE_ES lo) is default
+RTCC_PS_ON	=	%00000000	;Assigns prescaler to RTCC (PSA lo)
+RTCC_PS_OFF	=	%00001000	;Assigns prescaler to RTCC (PSA lo)
+PS_000		=	%00000000	;RTCC = 1:2, WDT = 1:1
+PS_001		=	%00000001	;RTCC = 1:4, WDT = 1:2
+PS_010		=	%00000010	;RTCC = 1:8, WDT = 1:4
+PS_011		=	%00000011	;RTCC = 1:16, WDT = 1:8
+PS_100		=	%00000100	;RTCC = 1:32, WDT = 1:16
+PS_101		=	%00000101	;RTCC = 1:64, WDT = 1:32
+PS_110		=	%00000110	;RTCC = 1:128, WDT = 1:64
+PS_111		=	%00000111	;RTCC = 1:256, WDT = 1:128
+
+		mov	w,#RTCC_PS_OFF	;setup option register
+		mov	!option,w
+		jmp	@main
+
+;*****************************************************************************************
+; MAIN PROGRAM CODE 
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Main
+	;*********************************************************************************
+main		
+		clrb	CTS
+		jb	rx_pin,$		; until the user presses a key, loop indefinetely
+
+		
+		clrb	hook			; pick up the line
+		setb	fsk_rx_en		; enable the FSK receiver
+
+	;*********************************************************************************
+	; Main Program Loop
+	;*********************************************************************************
+main_loop
+		
+		; Do nothing...  ISR Does everything.
+
+		jmp	main_loop
+
+
+;*****************************************************************************************
+END		;End of program code
+;*****************************************************************************************

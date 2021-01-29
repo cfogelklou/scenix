@@ -1,0 +1,2161 @@
+;*****************************************************************************************
+; Copyright © [11/21/1999] Scenix Semiconductor, Inc. All rights reserved.
+;
+; Scenix Semiconductor, Inc. assumes no responsibility or liability for
+; the use of this [product, application, software, any of these products].
+; Scenix Semiconductor conveys no license, implicitly or otherwise, under
+; any intellectual property rights.
+; Information contained in this publication regarding (e.g.: application,
+; implementation) and the like is intended through suggestion only and may
+; be superseded by updates. Scenix Semiconductor makes no representation
+; or warranties with respect to the accuracy or use of these information,
+; or infringement of patents arising from such use or otherwise.
+;*****************************************************************************************
+; 
+; Filename:	DTMF_detection.src
+;
+; Authors:	Chris Fogelklou
+;		Applications Engineer	
+;		Scenix Semiconductor, Inc.
+;		
+; Revision:	4.00
+;
+; Part:		AB9921AB
+; Freq:		12MHz
+;
+; Compiled using: SX-Key 28L
+;
+; Date Written: Feb 24, 2000
+;
+; Last Revised: Feb 24, 2000
+;
+; Program Description:
+;
+;		DTMF Detection code, new reference algorithm...
+;		Ported working customer code to a 12MHz XTAL
+;		Contains a 9600bps UART for output to a terminal screen
+; Interface Pins:
+;
+;		rs232RxPin      equ     ra.1		;UART receive input
+;		rs232TxPin      equ     ra.2		;UART transmit output
+;		DTMFInPin	equ	rc.2		;DTMF Input Pin
+;		DTMFFdbkPin	equ	rc.3		;DTMF Feedback Pin
+;	
+; Revision History:
+;
+;		1.0 Ported customer DTMF detection code to a demo program
+;
+;		Put rest of revision history here...
+;
+;*****************************************************************************************
+watch	sinAcc1Lo,16,sdec
+watch	cosAcc1Lo,16,sdec
+watch	sinAcc2Lo,16,sdec
+watch	cosAcc2Lo,16,sdec
+watch	sinAcc3Lo,16,sdec
+watch	cosAcc3Lo,16,sdec
+watch	sinAcc4Lo,16,sdec
+watch	cosAcc4Lo,16,sdec
+watch	wreg,1,fstr
+watch	wreg,8,sdec
+watch	wreg,8,udec
+watch	highFreqPower,8,udec
+watch	lowFreqPower,8,udec
+watch	thresh,8,udec
+watch	dtmfSampleCount,8,udec
+watch	result1,8,udec
+watch	result2,8,udec
+watch	result3,8,udec
+watch	result4,8,udec
+watch	highScore,8,udec
+watch	runnerUpScore,8,udec
+watch	runnerUpIndex,8,udec
+watch	winnerIndex,8,udec
+
+
+;*****************************************************************************************
+; Target SX
+; Uncomment one of the following lines to choose the SX18AC, SX20AC, SX28AC, SX48BD/ES,
+; SX48BD, SX52BD/ES or SX52BD. For SX48BD/ES and SX52BD/ES, uncomment both defines,
+; SX48_52 and SX48_52_ES.
+;*****************************************************************************************
+;SX18_20
+SX28
+;SX48_52
+;SX48_52_ES
+
+;*****************************************************************************************
+; Assembler Used
+; Uncomment the following line if using the Parallax SX-Key assembler. SASM assembler
+; enabled by default.
+;*****************************************************************************************
+SX_Key
+
+	;*********************************************************************************
+	; Assembler directives:
+	;	high speed external osc, turbo mode, 8-level stack, and extended option reg.
+	;
+	;	SX18/20/28 - 4 pages of program memory and 8 banks of RAM enabled by default.
+	;	SX48/52 - 8 pages of program memory and 16 banks of RAM enabled by default.
+	;                
+	;*********************************************************************************
+
+IFDEF SX_Key 				;SX-Key Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SX-Key
+		device	SX18L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SX-Key		
+		device	SX28L,oscxt4,turbo,stackx_optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SX-Key
+		device	oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48/52/BD device directives for SX-Key
+		device	oschs2
+    ENDIF
+  ENDIF
+		freq	12_000_000
+ELSE  					;SASM Directives
+  IFDEF SX18_20				;SX18AC or SX20AC device directives for SASM
+		device	SX18,oschs1,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX28				;SX28AC device directives for SASM
+		device	SX28,oschs1,turbo,stackx,optionx
+  ENDIF
+  IFDEF SX48_52_ES			;SX48BD/ES or SX52BD/ES device directives for SASM
+		device	SX52,oschs,turbo,stackx,optionx
+  ELSE
+    IFDEF SX48_52			;SX48BD or SX52BD device directives for SASM
+		device	SX52,oschs1,stackx,optionx   
+    ENDIF
+  ENDIF
+ENDIF
+		id	'DTMFDET4'	
+		reset	resetEntry	; set reset vector
+
+;*****************************************************************************************
+; Macros
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	To support compatibility between source code written for the SX28 and the SX52,
+	;	use macros.
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	;*********************************************************************************
+	; Macro: _bank
+	; Sets the bank appropriately for all revisions of SX.
+	;
+	; This is required since the bank instruction has only a 3-bit operand, it cannot
+	; be used to access all 16 banks of the SX48/52. For this reason FSR.4 (for SX48/52BD/ES)
+	; or FSR.7 (SX48/52bd production release) needs to be set appropriately, depending
+	; on the bank address being accessed. This macro fixes this.
+	;
+	; So, instead of using the bank instruction to switch between banks, use _bank instead.
+	; 
+	;*********************************************************************************
+
+_bank	macro	1
+	bank	\1
+
+	IFDEF SX48_52
+	  IFDEF SX48_52_ES
+	    IF \1 & %00010000		;SX48BD/ES and SX52BD/ES (engineering sample) bank instruction
+		setb	fsr.4		;modifies FSR bits 5,6 and 7. FSR.4 needs to be set by software.
+	    ENDIF
+	  ELSE
+	    IF \1 & %10000000		;SX48BD and SX52BD (production release) bank instruction 
+		setb	fsr.7		;modifies FSR bits 4,5 and 6. FSR.7 needs to be set by software.
+	    ELSE
+		clrb	fsr.7
+	    ENDIF
+	  ENDIF
+	ENDIF
+	endm
+
+
+	;*****************************************************************************************
+	; Macros for SX28/52 Compatibility
+	;*****************************************************************************************
+	;*********************************************************************************
+	; Macro: _mode
+	; Sets the MODE register appropriately for all revisions of SX.
+	;
+	; This is required since the MODE (or MOV M,#) instruction has only a 4-bit operand. 
+	; The SX18/20/28AC use only 4 bits of the MODE register, however the SX48/52BD have 
+	; the added ability of reading or writing some of the MODE registers, and therefore use
+	; 5-bits of the MODE register. The  MOV M,W instruction modifies all 8-bits of the 
+	; MODE register, so this instruction must be used on the SX48/52BD to make sure the MODE
+	; register is written with the correct value. This macro fixes this.
+	;
+	; So, instead of using the MODE or MOV M,# instructions to load the M register, use
+	;  _mode instead.
+	; 
+	;*********************************************************************************
+_mode	macro	1
+	IFDEF SX48_52
+		mov	w,#\1		;loads the M register correctly for the SX48BD and SX52BD
+		mov	m,w
+	ELSE
+		mov	m,#\1		;loads the M register correctly for the SX18AC, SX20AC
+					;and SX28AC
+	ENDIF
+	endm
+
+	;*****************************************************************************************
+	; INCP/DECP macros for incrementing/decrementing pointers to RAM
+	; used to compensate for incompatibilities between SX28 and SX52
+	;*****************************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	To support compatibility between source code written for the SX28 and the SX52,
+	;	use macros.  This macro compensates for the fact that RAM banks are contiguous in
+	;	the SX52, but separated by 0x20 in the SX18/28.
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+INCP	macro	1
+		inc	\1
+	IFNDEF	SX48_52
+		setb	\1.4		; If SX18 or SX28, keep bit 4 of the pointer = 1
+	ENDIF				; to jump from $1f to $30, etc.
+endm
+		
+DECP	macro	1
+	IFDEF	SX48_52
+		dec	\1
+	ELSE
+		clrb	\1.4		; If SX18 or SX28, forces rollover to next bank
+		dec	\1		; if it rolls over.  (Skips banks with bit 4 = 0)
+		setb	\1.4		; Eg:  $30 --> $20 --> $1f --> $1f
+	ENDIF				; AND: $31 --> $21 --> $20 --> $30
+endm
+
+	;*****************************************************************************************
+	; Error generating macros
+	; Used to generate an error message if the label is unintentionally moved into the 
+	; second half of a page.  Use for lookup tables.
+	;*****************************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	Surround lookup tables with the tableStart and tableEnd macros.  An error will
+	;	be generated on assembly if the table crosses a page boundary.
+	;	
+	;	Example:
+	;		lookupTable1
+	;			add	pc,w
+	;		tableStart
+	;			retw	0
+	;			retw	20
+	;			retw	-20
+	;			retw	-40
+	;		tableEnd
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+tableStart	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+tableEnd	macro 0			; Generates an error message if code that MUST be in
+					; the first half of a page is moved into the second half.
+	if $ & $100
+		ERROR  'Must be located in the first half of a page.'
+	endif
+endm
+
+;*****************************************************************************************
+; Data Memory address definitions
+; These definitions ensure the proper address is used for banks 0 - 7 for 2K SX devices
+; (SX18/20/28) and 4K SX devices (SX48/52). 
+;*****************************************************************************************
+IFDEF SX48_52
+
+global_org	=	$0A
+bank0_org	=	$00
+bank1_org	=	$10
+bank2_org	=	$20
+bank3_org	=	$30
+bank4_org	=	$40
+bank5_org	=	$50
+bank6_org	=	$60
+bank7_org	=	$70
+
+ELSE
+
+global_org	=	$08
+bank0_org	=	$10
+bank1_org	=	$30
+bank2_org	=	$50
+bank3_org	=	$70
+bank4_org	=	$90
+bank5_org	=	$B0
+bank6_org	=	$D0
+bank7_org	=	$F0
+
+ENDIF
+;*****************************************************************************************
+; Global Register definitions
+; NOTE: Global data memory starts at $0A on SX48/52 and $08 on SX18/20/28.
+;*****************************************************************************************
+
+		org     global_org
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;   	Use only these defined label types for global registers.  If an extra temporary 
+	;	register is required, adhere to these label types.  For instance, if two temporary
+	;	registers are required for the Interrupt Service Routine, use the label isrTemp1
+	;	for it.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+		sample_lows_bit	equ	4	; keep here just in case bit moves around.
+
+flags0		equ	global_org + 0  ; stores bit-wise operators like flags 
+						; and function-enabling bits (semaphores)
+	;VP: RS232 Receive
+	dtmfDetectEn	equ	flags0.1
+	timerFlag	equ	flags0.2
+	sampleLows	equ	flags0.sample_lows_bit
+	dtmfDetectDone	equ	flags0.5 ; Flag that indicates to main program that the 
+					 ; sampling period is over.
+
+localTemp0	equ	global_org + 1	; temporary storage register
+						; Used by first level of nesting
+						; Never guaranteed to maintain data
+localTemp1	equ	global_org + 2	; temporary storage register	
+						; Used by second level of nesting
+						; or when a routine needs more than one 
+						; temporary global register.	
+localTemp2	equ	global_org + 3	; temporary storage register
+						; Used by third level of nesting or by
+						; main loop routines that need a loop 
+						; counter, etc.
+isrTemp0	equ	global_org + 4	; Interrupt Service Routine's temp register.  
+						; Don't use this register in the mainline.
+isrTemp1	equ	global_org + 5	; Another temp register for the ISR...
+		inputSign	equ	isrTemp1.0 	; used by DTMF detection.
+
+;*****************************************************************************************
+; RAM Bank Register definitions
+;*****************************************************************************************
+
+	;*********************************************************************************
+	; Bank 0
+	;*********************************************************************************
+		org     bank0_org
+
+
+bank0		=	$
+	
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Avoid using bank0 in programs written for SX48/52.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	;*********************************************************************************
+	; Bank 1
+	;*********************************************************************************
+		org     bank1_org
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;	Tip 1:
+	;	Indicate which Virtual Peripherals a portion of source code or declaration belongs
+	;	to with a ;VP: VirtualPeripheralName comment.
+	;
+	;	Tip 2:
+	;	All RAM location declaration names should be
+	;   	- left justified
+	;	- less than 2 tabs in length
+	;	- written in hungarian notation
+	;	- prefixed by a truncated version of the Virtual Peripheral's name
+	;	
+	;	Examples:
+	;
+	;	;VP: RS232 Transmit
+	;
+	;	rs232TxBank	=       $                       ;RS232 Transmit bank
+	;
+	; 	rs232TxHigh	ds      1                       ;hi byte to transmit
+	;	rs232TxLow	ds      1                       ;low byte to transmit
+	;	rs232TxCount	ds      1                       ;number of bits sent
+	;	rs232TxDivide	ds      1                       ;xmit timing (/16) counter
+	;	rs232TxString	ds	1			;the address of the string to be sent
+	;	rs232TxByte	ds	1			;semi-temporary serial register
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+;VP:	5ms Timer
+timerBank	=	$
+timer5ms	ds	1
+timerDiv	ds	1
+
+;VP: RS232 Transmit
+rs232TxBank	=       $	;UART Transmit bank
+rs232TxHigh	ds      1	;hi byte to transmit
+rs232TxLow	ds      1	;low byte to transmit
+rs232TxCount	ds      1	;number of bits sent
+rs232TxDivide	ds      1	;xmit timing (/16) counter
+
+
+	;*********************************************************************************
+	; Bank 2
+	;*********************************************************************************
+		org     bank2_org
+
+bank2		=	$
+
+	;*********************************************************************************
+	; Bank 3
+	;*********************************************************************************
+		org     bank3_org
+
+bank3		=	$
+
+	;*********************************************************************************
+	; Bank 4
+	;*********************************************************************************
+		org     bank4_org
+
+bank4		=	$
+
+	;*********************************************************************************
+	; Bank 5
+	;*********************************************************************************
+		org     bank5_org
+
+bank5		=	$
+
+	refBank	= 	$	; Accumulator/counters used to run the references.
+	refAcc1Lo	ds	1	; the low byte of the phase accumulator for the lowest frequency being generated
+	refAcc1Hi	ds	1	
+	refAcc2Lo	ds	1
+	refAcc2Hi	ds	1
+	refAcc3Lo	ds	1
+	refAcc3Hi	ds	1
+	refAcc4Lo	ds	1
+	refAcc4Hi	ds	1	; the high byte of the phase accumulator for the highest frequency being generated
+	highFreqIndex	ds	1
+	lowFreqIndex	ds	1
+	highFreqPower	ds	1
+	lowFreqPower	ds	1
+	thresh		equ	refAcc1Lo
+	dtmfSampleCount	ds	1
+	dtmfDigitIndex	ds	1	; the index that points to a valid DTMF digit
+	;*********************************************************************************
+	; Bank 6
+	;*********************************************************************************
+		org     bank6_org
+
+bank6		=	$
+
+	DTMF_CH_1	=	$
+
+	sinAcc1Lo	ds	1		; Sine and cosine accumulators for accumulating the results of the DFT
+	sinAcc1Hi	ds	1
+	cosAcc1Lo	ds	1
+	cosAcc1Hi	ds	1
+	sinAcc2Lo	ds	1
+	sinAcc2Hi	ds	1
+	cosAcc2Lo	ds	1
+	cosAcc2Hi	ds	1
+	sinAcc3Lo	ds	1
+	sinAcc3Hi	ds	1
+	cosAcc3Lo	ds	1
+	cosAcc3Hi	ds	1
+	sinAcc4Lo	ds	1
+	sinAcc4Hi	ds	1
+	cosAcc4Lo	ds	1
+	cosAcc4Hi	ds	1
+
+	result1		equ	sinAcc1Lo
+	result2		equ	sinAcc1Hi
+	result3		equ	cosAcc1Lo
+	result4		equ	cosAcc1Hi
+	highScore	equ	sinAcc2Lo
+	runnerUpScore	equ	sinAcc2Hi
+	runnerUpIndex	equ	cosAcc2Lo
+	winnerIndex	equ	cosAcc2Hi
+
+
+	;*********************************************************************************
+	; Bank 7
+	;*********************************************************************************
+		org     bank7_org
+
+bank7		=	$
+
+mathBank	=	$
+
+loopCount	ds	1
+mathFlags	ds	1
+	neg		equ	mathFlags.0
+rootMask	ds	1
+
+aLo		ds	1
+aHi		ds	1
+a		equ	aLo
+
+bLo		ds	1
+bHi		ds	1
+b		equ	bLo
+
+rLo		ds	1
+rHi		ds	1
+
+dLo		ds	1
+dHi		ds	1
+d		equ	dLo
+
+input		equ	dLo
+
+AtoDBank		equ	$	; A to D is only used for DTMF
+AtoDVal			ds	1
+
+AtoDCount		ds	1
+AtoDBitsHi		ds	1
+AtoDBitsLo		ds	1
+
+IFDEF SX48_52
+	;*********************************************************************************
+	; Bank 8
+	;*********************************************************************************
+		org	$80	;bank 8 address on SX52
+
+bank8		=	$
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- This extra memory is not available in the SX18/28, so don't use it for Virtual
+	;	  Peripherals written for both platforms.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+	;*********************************************************************************
+	; Bank 9
+	;*********************************************************************************
+		org	$90	;bank 9 address on SX52
+
+bank9		=	$
+
+
+	;*********************************************************************************
+	; Bank A
+	;*********************************************************************************
+		org	$A0	;bank A address on SX52
+
+bankA		=	$
+
+
+	;*********************************************************************************
+	; Bank B
+	;*********************************************************************************
+		org	$B0	;bank B address on SX52
+
+bankB		=	$
+
+
+	;*********************************************************************************
+	; Bank C
+	;*********************************************************************************
+		org	$C0	;bank C address on SX52
+
+bankC		=	$
+
+
+	;*********************************************************************************
+	; Bank D
+	;*********************************************************************************
+		org	$D0	;bank D address on SX52
+
+bankD		=	$
+
+
+	;*********************************************************************************
+	; Bank E
+	;*********************************************************************************
+		org	$E0	;bank E address on SX52
+
+bankE		=	$
+
+
+	;*********************************************************************************
+	; Bank F
+	;*********************************************************************************
+		org	$F0	;bank F address on SX52
+
+bankF		=	$
+
+
+ENDIF
+		
+	;*********************************************************************************
+	; Pin Definitions:  
+	;*********************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Store all initialization constants for the I/O in the same area, so
+	;	  pins can be easily moved around.
+	;	- Pin definitions should follow the same format guidelines as RAM definitions
+	;		- Left justified
+	;		- Hungarian Notation
+	;		- Less that 2 tabs in length
+	;		- Indicate the Virtual Peripheral the pin is used for
+	;	- Only use symbolic names to access a pin/port in the source code.
+	;	- Example:
+	;		; VP: RS232 Transmit
+	;			rs232TxPin	equ	ra.3
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+PDMPin		equ	ra.0	; D/A output pin
+rs232RxPin	equ	ra.1	; RS-232 reception pin
+rs232TxPin	equ	ra.2	; RS-232 transmission pin
+nothing		equ	ra.3	; N/C
+
+RA_latch	equ	%11111111		;SX18/20/28/48/52 port A latch init
+RA_DDIR		equ	%11111011		;SX18/20/28/48/52 port A DDIR value
+RA_LVL		equ	%00000000		;SX18/20/28/48/52 port A LVL value
+RA_PLP		equ	%11111111		;SX18/20/28/48/52 port A PLP value
+
+ledPin		equ	rb.0	; LED pin
+rxaPin		equ	rb.1	; FSK receive pin
+cntrl_1		equ	rb.2	; drive cntrl_1 low to disable the output of the LPF
+ring		equ	rb.3	; ring detection pin
+hook		equ	rb.4	; drive hook low to go off-hook
+cntrl_3		equ	rb.5	; drive cntrl_3 low to disable the output of the HPF
+rts		equ	rb.6	; indicates to the SX that the PC wants to transmit data
+cts		equ	rb.7	; indicates to the PC that the SX is ready to receive data
+
+RB_latch	equ	%00010000		;SX18/20/28/48/52 port B latch init
+RB_DDIR		equ	%11101110		;SX18/20/28/48/52 port B DDIR value
+RB_ST		equ	%11111111		;SX18/20/28/48/52 port B ST value
+RB_LVL		equ	%00000000		;SX18/20/28/48/52 port B LVL value
+RB_PLP		equ	%11111111		;SX18/20/28/48/52 port B PLP value
+
+dtmfInPin	equ	rc.0	; Old DTMF algorithm input pin
+dtmfFdbkPin	equ	rc.1	; Old DTMF algorithm feedback pin (high gain)
+AtoDInPin	equ	rc.2	; New DTMF algorithm input pin 
+AtoDFdbkPin	equ	rc.3	; New DTMF algorithm feedback pin (lower gain)
+imp450Pin	equ	rc.4	; Make low impedance to cancel output signals on a 450ohm line
+imp600Pin	equ	rc.5	; Make low impedance to cancel output signals on a 600ohm line
+imp750Pin	equ	rc.6	; Make low impedance to cancel output signals on a 750ohm line
+imp900Pin	equ	rc.7	; Make low impedance to cancel output signals on a 900ohm line
+
+RC_latch	equ	%00000000		;SX18/20/28/48/52 port C latch init
+RC_DDIR		equ	%11010101		;SX18/20/28/48/52 port C DDIR value
+RC_ST		equ	%11111111		;SX18/20/28/48/52 port C ST value
+RC_LVL		equ	%00000000		;SX18/20/28/48/52 port C LVL value
+RC_PLP		equ	%11111111		;SX18/20/28/48/52 port C PLP value
+
+IFDEF SX48_52	;SX48BD/52BD Port initialization values
+RD_latch	equ	%00000000		;SX48/52 port D latch init
+RD_DDIR		equ	%11111111		;SX48/52 port D DDIR value
+RD_ST		equ	%11111111		;SX48/52 port D ST value
+RD_LVL		equ	%00000000		;SX48/52 port D LVL value
+RD_PLP		equ	%11111111		;SX48/52 port D PLP value
+
+RE_latch	equ	%00000000		;SX48/52 port E latch init
+RE_DDIR		equ	%11111111		;SX48/52 port E DDIR value
+RE_ST		equ	%11111111		;SX48/52 port E ST value
+RE_LVL		equ	%00000000		;SX48/52 port E LVL value
+RE_PLP		equ	%11111111		;SX48/52 port E PLP value
+ENDIF
+
+;*****************************************************************************************
+; Program constants
+;*****************************************************************************************
+
+;-------------------------------------------------------------------------------------
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	To calculate the interrupt period in cycles:
+	;	- First, choose the desired interrupt frequency
+	;		- Should be a multiple of each Virtual Peripherals sampling frequency.
+	;		- Example:  19200kHz UART sampling rate * 16 = 307.200kHz
+	;	- Next, choose the desired oscillator frequency.
+	;		- 50MHz, for example.
+	;	- Perform the calculation int_period = (osc. frequency / interrupt frequency)
+	;				  		= (50MHz / 307.2kHz)
+	;						= 162.7604
+	;	- Round int_period to the nearest integer:
+	;						= 163
+	;	- Now calculate your actual interrupt rate:
+	;						= osc. frequency / int_period
+	;						= 50MHz / 163
+	;						= 306.748kHz
+	;	- This interrupt frequency will be the timebase for all of the Virtual 
+	;	  Peripherals
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+Prescaler	=	8
+dtmfIntPeriod1	=	156	; Gives an interrupt period at 12MHz of (156.25 * 8 (1/12000000)s) = 104.167us
+				; Which gives an interrupt frequency of (1/104.167us)Hz = 9600Hz
+dtmfIntPeriod2	=	156
+dtmfIntPeriod3	=	156
+dtmfIntPeriod4	=	157	; 
+
+intPeriod	=	104	; For the other VP's, run the ISR at 115200Hz
+				; 12MHz/115200 gives an interrupt period of 104.167
+				; 12MHz/104 gives an actual interrupt rate of 115385Hz
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	- Include all calculations for Virtual Peripheral constants for any sample 
+	;	  rate.
+	;	- Relate all Virtual Peripheral constants to the sample rate of the Virtual
+	;	  Peripheral.
+	;	- Example:
+	;		; VP: 5ms Timer
+	;		TIMER_DIV_CONST	equ 192	; This constant = timer sample rate/200Hz = 192
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+;VP: RS232 Transmit   AND
+;VP: RS232 Receive
+
+UART1_Fs	=	38400		
+				; Actual calculated ISR frequency / 4.
+				; How often is the UART sampled?  If it is sampled on
+				; every 4th pass of the ISR, so this number is the ISR rate/4
+				; this number must be close to the desired UART rate * n.
+				; where n must be an even number and preferably >= 4
+				; For instance:  For 38400bps, use 38400Hz*4, 38400Hz*6, etc.
+UART1_Baud	=	9600	; Baud rate is 9600bps
+
+; *** Uart Divide Rates:  These numbers indicate the divide rate for the UARTs.
+;			  Example:  If the desired UART rate is 19200 and the actual sample
+;				    rate is 230.4kHz, the divide ratio is 230.4kHz/19200Hz = 12
+
+UART1_Divide	=	UART1_Fs/UART1_Baud	; Divide rate constant used by the program
+UART1_St_Delay	=	UART1_Divide + (UART1_Divide/2)	; Start delay constant used by the program
+
+
+;VP: DTMF Detection
+;**************************************************************************
+; CALCULATING CONSTANTS FOR DTMF DETECTION
+;
+; The constant = 2^n * Ts * FREQ, 
+; where n is the number of bits in the phase accumulator for each
+; signal generator, Ts is the sample rate, and FREQ is the desired
+; output frequency.
+; We know that the phase accumulator (phaseAcc) is 16 bits, so n = 16
+;
+; = 1/([cyclesperinterrupt] * [instructiontime] * [ISR passes]) 
+;
+; Therefore, the constant = 2^n * (1/Fs) * FREQ
+;
+; Convert the result of the calculation to a hexadecimal number and load
+; the upper byte into the phaseAccHi register and the lower byte 
+;**************************************************************************
+Fs = 9600				; sampling frequency for DTMF detection
+Bits = 65536				; 2^16 is the value of the phase accumulator
+
+f697Lo		equ	((Bits * 697)/Fs) & $0ff	; low 8 bits of 16 bit constant
+f697Hi		equ	((Bits * 697)/Fs) >> 8		; high 8 bits of 16 bit constant
+
+f770Lo		equ	((Bits * 770)/Fs) & $0ff
+f770Hi		equ	((Bits * 770)/Fs) >> 8
+
+f852Lo		equ	((Bits * 852)/Fs) & $0ff
+f852Hi		equ	((Bits * 852)/Fs) >> 8
+
+f941Lo		equ	((Bits * 941)/Fs) & $0ff
+f941Hi		equ	((Bits * 941)/Fs) >> 8
+
+f1209Lo		equ	((Bits * 1209)/Fs) & $0ff
+f1209Hi		equ	((Bits * 1209)/Fs) >> 8
+
+f1336Lo		equ	((Bits * 1336)/Fs) & $0ff
+f1336Hi		equ	((Bits * 1336)/Fs) >> 8
+
+f1477Lo		equ	((Bits * 1477)/Fs) & $0ff
+f1477Hi		equ	((Bits * 1477)/Fs) >> 8
+
+f1633Lo		equ	((Bits * 1633)/Fs) & $0ff
+f1633Hi		equ	((Bits * 1633)/Fs) >> 8
+
+
+SCALING_FACTOR	equ	4			; the number of bits to shift the accumulated results
+						; to the right to squeeze them into 8 bits.  Decrease this
+						; for sensitivity to smaller signals.
+AD_NUM_SAMPLES	equ	36			; count 36 feedback bits per sample.
+						; higher values take longer to process, so will reject higher
+						; frequencies.
+						; To decrease the scaling factor, decrease this as well.  Accumulated
+						; results will be smaller.
+MINIMUM_SCORE	equ	20			; The minimum score required to detect a valid digit
+
+LOW_SAMPLES		equ	140		; The number of samples to take to detect a low frequency
+HIGH_SAMPLES		equ	105		; The number of samples to take to detect a high frequency
+
+;-------------------------------------------------------------------------------------
+IFDEF SX48_52
+	;*********************************************************************************
+	; SX48BD/52BD Mode addresses
+	; *On SX48BD/52BD, most registers addressed via mode are read and write, with the
+	; exception of CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Timer (read) addresses
+TCPL_R		equ	$02		;Read Timer Capture register low byte
+TCPH_R		equ	$02		;Read Timer Capture register high byte
+TR2CML_R	equ	$02		;Read Timer R2 low byte
+TR2CMH_R	equ	$03		;Read Timer R2 high byte
+TR1CML_R	equ	$04		;Read Timer R1 low byte
+TR1CMH_R	equ	$05 		;Read Timer R1 high byte
+TCNTB_R		equ	$06		;Read Timer control register B
+TCNTA_R		equ	$07		;Read Timer control register A
+
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_R		equ	$0A		;Read MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_R		equ	$0B		;Read MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_R		equ	$0C		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_R		equ	$0D		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_R		equ	$0E		;Read Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_R		equ	$0F		;Read Port Direction
+
+; Timer (write) addresses
+TR2CML_W	equ	$12		;Write Timer R2 low byte
+TR2CMH_W	equ	$13		;Write Timer R2 high byte
+TR1CML_W	equ	$14		;Write Timer R1 low byte
+TR1CMH_W	equ	$15 		;Write Timer R1 high byte
+TCNTB_W		equ	$16		;Write Timer control register B
+TCNTA_W		equ	$17		;Write Timer control register A
+
+; Port setup (write) addresses
+WKED_W		equ	$1A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$1B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$1C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$1D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$1E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$1F		;Write Port Direction
+
+ELSE
+
+	;*********************************************************************************
+	; SX18AC/20AC/28AC Mode addresses
+	; *On SX18/20/28, all registers addressed via mode are write only, with the exception of
+	; CMP and WKPND which do an exchange with W.
+	;*********************************************************************************
+; Exchange addresses
+CMP		equ	$08		;Exchange Comparator enable/status register with W
+WKPND		equ	$09		;Exchange MIWU/RB Interrupts pending with W
+
+; Port setup (read) addresses
+WKED_W		equ	$0A		;Write MIWU/RB Interrupt edge setup, 0 = falling, 1 = rising
+WKEN_W		equ	$0B		;Write MIWU/RB Interrupt edge setup, 0 = enabled, 1 = disabled
+ST_W		equ	$0C		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+LVL_W		equ	$0D		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+PLP_W		equ	$0E		;Write Port Schmitt Trigger setup, 0 = enabled, 1 = disabled
+DDIR_W		equ	$0F		;Write Port Direction
+ENDIF
+
+
+;*****************************************************************************************
+; Program memory ORG defines
+;*****************************************************************************************
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Place a table at the top of the source with the starting addresses of all of
+	;	  the components of the program.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+INTERRUPT_ORG		equ	$0	; Interrupt must always start at location zero
+INTERRUPT2_ORG		equ	$100	; The second half of page $100
+RESET_ENTRY_ORG		equ	$1FB	; The program will jump here on reset.
+SUBROUTINES_ORG		equ	$200	; The subroutines are in this location
+STRINGS_ORG		equ	$300	; The strings are in location $300
+DTMF_SUBS_ORG		equ	$400	; DTMF calculation subroutines
+MAIN_PROGRAM_ORG	equ	$600	; The main program is in the last page of program memory.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;****************************** Beginning of program space *******************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+	org	INTERRUPT_ORG			; First location in program memory.
+;*****************************************************************************************
+;------------------------------------------------------------------------------
+; Interrupt Service Routine
+;------------------------------------------------------------------------------
+; Note: The interrupt code must always originate at address $0.
+;
+; Interrupt Frequency = (Cycle Frequency / -(retiw value))  For example:
+; With a retiw value of -163 and an oscillator frequency of 50MHz, this
+; code runs every 3.26us.
+;------------------------------------------------------------------------------
+ISR						;3	The interrupt service routine...
+
+
+;VP  rs232 Transmit @ 9600bps
+;------------------------------------------------------------------------------
+; 400 Cycles Here ... Do RS-232
+;------------------------------------------------------------------------------
+
+;--------------------------- RS232 transmit at 9600bps!!!
+		bank	rs232TxBank		;2 switch to serial register bank
+		test    rs232TxCount		;1 are we sending?
+		snz				;1  
+		jmp	:noTransmit		;1,3 
+:txbit		clc                             ;1 yes, ready stop bit
+		rr      rs232TxHigh		;1  and shift to next bit
+		rr      rs232TxLow		;1  
+		dec     rs232TxCount		;1 decrement bit counter
+		snb	rs232TxLow.6		;1 output next bit
+		clrb	rs232TxPin		;1  
+		sb	rs232TxLow.6		;1  
+		setb	rs232TxPin		;1,16
+:rs232TxOut
+;--------------------------- End of RS232 transmit VP
+
+	snb	dtmfDetectEn			;1,17 cycles fixed to here...
+	jmp	dtmfDetIsr			; If DTMF Detection is enabled, run the DTMF detection ISR
+	jmp	dtmfDone			; Else, skip them
+
+:noTransmit					;10 This is here to create a fixed delay before entry to 
+	jmp	:d1				;3 the DTMF detection ISR
+:d1	jmp	:rs232TxOut			;3
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;******************************************************************************
+; Portions of DTMF Detection ISR that must be in the first 1/2 page...  (Tables, etc.)
+;******************************************************************************
+;------------------------------------------------------------------------------
+sineTableTiny
+;------------------------------------------------------------------------------
+tableStart				; trap an error if this is not in the first half
+				;3	; of a page
+	and	w,#%00000111	;1 keep w within range
+	jmp	pc+w		;3
+	retw	0		;3	;3,10
+	retw	1
+	retw	1
+	retw	2
+	retw	2
+	retw	2
+	retw	1
+	retw	1
+tableEnd				; trap an error if this is not in the first half
+					; of a page
+;------------------------------------------------------------------------------
+dtmfRetTable	; returns with a new retiw value to keep the timing for DTMF as
+		; accurate as possible.
+;------------------------------------------------------------------------------
+tableStart				; trap an error if this is not in the first half
+				;3	; of a page
+	add	pc,w		;3	
+	retw	-dtmfIntPeriod1	;3
+	retw	-dtmfIntPeriod2
+	retw	-dtmfIntPeriod3
+	retw	-dtmfIntPeriod4
+tableEnd				; trap an error if this is not in the first half
+					; of a page
+;------------------------------------------------------------------------------
+
+
+;------------------------------------------------------------------------------
+; Jump table for the DTMF detection routines
+;------------------------------------------------------------------------------
+tableStart				; trap an error if this is not in the first half
+					; of a page
+dtmfDetectSine		jmp	_dtmfDetectSine
+dtmfDetectCosine	jmp	_dtmfDetectCosine
+tableEnd				; trap an error if this is not in the first half
+					; of a page
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+org	INTERRUPT2_ORG
+;******************************************************************************
+;******************************************************************************
+;******************************************************************************
+; Portions of DTMF Detection ISR that can be in the second half of a page...
+;******************************************************************************
+dtmfDetIsr
+;------------------------------------------------------------------------------
+; 7 Cycles Here ... have (12000000/9600) = 1250 cycles to work with.
+;
+; Do A/D Conversion
+;------------------------------------------------------------------------------
+						;7
+	bank	AtoDBank			;1
+	mov	AtoDCount,#AD_NUM_SAMPLES	;2
+	clr	AtoDVal				;2,12
+:AtoDloop2
+
+	mov	w,<<rc				;1 Negative feedback to A/D
+	not	w				;1
+	and	w,#%00001111			;1
+	mov	rc,w				;1
+
+	snb	AtoDFdbkPin			;1 Store current bit conversion
+	inc	AtoDVal				;1 Increment A/D val if positive feedback
+	sb	AtoDFdbkPin			;1
+	dec	AtoDVal				;1 Decrement A/D val if negative feedback
+
+	decsz	AtoDCount			;1,7
+	jmp	:AtoDLoop2			;3,12 cycles in the loop
+						; total loop time = (12 * 47) + 10 = 574 cycles
+	clrb	AtoDFdbkPin			;1 Make the A/D feedback pin low
+;------------------------------------------------------------------------------
+; 394 Cycles Here ... 
+;------------------------------------------------------------------------------
+	clrb	inputSign
+	sb	AtoDVal.7			;1 check the sign bit of the A_to_D_val
+	jmp	:positive			;1
+:negative	
+	setb	inputSign			;1
+	not	AtoDVal				;1
+	inc	AtoDVal				;1,592
+:positive
+
+;------------------------------------------------------------------------------
+; 412 Cycles Here ... Update Reference frequencies
+;------------------------------------------------------------------------------
+
+; NOW UPDATE THE REFERENCES!!!
+	bank	refBank				;1
+	snb	sampleLows			;1
+	jmp	:doLowFrequencies		;3,331
+
+	add	refAcc1Lo,#f1209Lo	
+	snc				
+	inc	refAcc1Hi		
+	add	refAcc1Hi,#f1209Hi	
+	add	refAcc2Lo,#f1336Lo	
+	snc				
+	inc	refAcc2Hi		
+	add	refAcc2Hi,#f1336Hi	
+	add	refAcc3Lo,#f1477Lo	
+	snc				
+	inc	refAcc3Hi		
+	add	refAcc3Hi,#f1477Hi	
+	add	refAcc4Lo,#f1633Lo	
+	snc				
+	inc	refAcc4Hi		
+	add	refAcc4Hi,#f1633Hi	
+	jmp	calculateFrequencies
+
+:doLowFrequencies
+
+	add	refAcc1Lo,#f697Lo	;2
+	snc				;1
+	inc	refAcc1Hi		;1
+	add	refAcc1Hi,#f697Hi	;2
+	add	refAcc2Lo,#f770Lo	;2
+	snc				;1
+	inc	refAcc2Hi		;1
+	add	refAcc2Hi,#f770Hi	;2
+	add	refAcc3Lo,#f852Lo	;2
+	snc				;1
+	inc	refAcc3Hi		;1
+	add	refAcc3Hi,#f852Hi	;2
+	add	refAcc4Lo,#f941Lo	;2
+	snc				;1
+	inc	refAcc4Hi		;1
+	add	refAcc4Hi,#f941Hi	;2, worst case
+
+;------------------------------------------------------------------------------
+; 640 Cycles Here, Worst Case... Update Reference frequencies
+; Start cycle count from zero here...
+;------------------------------------------------------------------------------
+calculateFrequencies			;********************** 640 cycles to here... start over from zero
+:loop
+	
+	bank	AtoDBank		;1
+	test	AtoDVal			;1
+	jz	dtmfDone		;2,4
+
+
+	mov	fsr,#sinAcc1Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc1Hi		;1	
+	call	dtmfDetectSine	;44,48 for sine calculation
+
+	mov	fsr,#cosAcc1Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc1Hi		;1
+	call	dtmfDetectCosine	;48,52 for cosine calculation
+
+	mov	fsr,#sinAcc2Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc2Hi		;1	
+	call	dtmfDetectSine	;44
+	mov	fsr,#cosAcc2Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc2Hi		;1
+	call	dtmfDetectCosine	;48
+	mov	fsr,#sinAcc3Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc3Hi		;1	
+	call	dtmfDetectSine	;44
+	mov	fsr,#cosAcc3Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc3Hi		;1
+	call	dtmfDetectCosine	;48
+	mov	fsr,#sinAcc4Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc4Hi		;1	
+	call	dtmfDetectSine	;44
+	mov	fsr,#cosAcc4Lo		;2
+	bank	refBank			;1
+	mov	w,refAcc4Hi		;1
+	call	dtmfDetectCosine	;48
+
+					; Cycles from CALCULATE_FREQUENCIES = 4 + 4(48) + 4(52) = 404
+					; Total cycle count from here = 640 + 404 = 1044
+dtmfDone
+;------------------------------------------------------------------------------
+; 1044 Cycles Here, Worst Case... Do timers and return from interrupt.
+;------------------------------------------------------------------------------
+
+;VP: 5ms Timer
+
+	bank	timerBank		;1
+	decsz	timerDiv		;1
+	jmp	:noInc			;1
+	mov	w,#48			;1	Since this interrupt occurs every 104uS,
+	mov	timerDiv,w		;1      There are 48 * 104uS in 5mS
+	inc	timer5ms		;1
+	snz				;1
+	setb	timerFlag		;1
+:noInc
+
+;VP: LED flasher
+	sb	timer5ms.3		;1	Use these timers to flash the LED
+	setb	ledPin			;1
+	snb	timer5ms.3		;1
+	clrb	ledPin			;1
+
+;VP: DTMF Detection
+
+	bank	dtmfSampleCount		;1
+	dec	dtmfSampleCount		;1
+	snz				;1
+	setb	dtmfDetectDone		;1
+	mov	w,dtmfSampleCount	;1
+	and	w,#%00000011		;1
+	call	dtmfRetTable		;9
+
+	retiw				;3,22,1066 cycles to here.
+					; 1500 - 1066 cycles left over, or 434 cycles.
+;------------------------------------------------------------------------------
+; END OF DTMF DETECTION INTERRUPT SERVICE ROUTINE FLOW.
+; DTMF DETECT ISR SUBROUTINES HERE.
+;------------------------------------------------------------------------------
+;------------------------
+_dtmfDetectCosine
+; INPUTS:  WREG: 	High byte of index in w register
+;	   FSR:		Location of low byte of accumulator
+;------------------------
+	mov	isrTemp0,w		;1
+	add	isrTemp0,#$40		;2
+	mov	w,isrTemp0		;1
+
+;------------------------
+_dtmfDetectSine
+; INPUTS:  WREG: 	High byte of index in w register
+;	   FSR:		Location of low byte of accumulator
+;------------------------
+					;6
+	clr	isrTemp0		;1
+	snb	wreg.7			;1
+	setb	isrTemp0.0		;1
+	swap	wreg			;1 Use bits 6-3 as index into table
+	call	sineTableTiny		;1 get the value from the tiny sine table
+	jb	isrTemp0.0,:neg_ref	;2
+:pos_ref	
+	snb	inputSign		;1
+	setb	isrTemp0.0		;1
+	jmp	:refSignOut		;3,18
+:neg_ref
+	snb	inputSign
+	clrb	isrTemp0.0
+	
+:refSignOut	
+	snb	wreg.1			;1
+	jmp	:MULTIPLY_BY_TWO	;3,22 since max value of sine table is 2, if bit 1 is set, value is 2.
+	test	wreg			;
+	sz				;
+	jmp	:ADD_TO_ACC		; if value is not zero, it must be one.
+:ZERO	jmp	:NEXT
+
+:MULTIPLY_BY_TWO			; multiply the input value by two by shifting left once.
+	bank	AtoDBank		;1
+	clc				;1
+	mov	w,<<AtoDVal		;1
+	jmp	:add			;3,28
+:ADD_TO_ACC
+	bank	AtoDBank		;
+	clc				;
+	mov	w,AtoDVal		;
+:add	
+	snb	isrTemp0.0		;1 2's complement the input if the sign is negative
+	not	wreg			;1
+	snb	isrTemp0.0		;1
+	inc	wreg			;1,32
+
+	bank	DTMF_CH_1		;1 add the input value * reference to the accumulator
+	add	indf,w			;1
+	inc	fsr			;1
+	snc				;1
+	inc	indf			;1 if carry, increment the high byte of the accumulator
+	clr	w			;1
+	snb	isrTemp0.0		;1 if input sign is negative, add -1 to the high byte of the accumulator
+	mov	w,#-1			;1
+	add	indf,w			;1
+:NEXT	ret				;3 and return to caller.
+					;44 cycles from call for sine calcs
+					;48 for cosine calcs
+	
+;------------------------------------------------------------------------------
+; END OF DTMF DETECTION INTERRUPT SERVICE ROUTINE SUBROUTINES
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;*****************************************************************************************
+org	RESET_ENTRY_ORG
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	The main program operation should be easy to find, so place it at the end of the 
+	;	program code.  This means that if the first page is used for anything other than 
+	;	main program source code, a reset_entry must be placed in the first page, along 
+	;	with a 'page' instruction and a 'jump' instruction to the beginning of the 
+	;	main program.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+;------------------------------------------------------------------------------
+resetEntry					; Program starts here on power-up
+	page	_resetEntry
+	jmp	_resetEntry
+;------------------------------------------------------------------------------
+
+
+
+
+
+
+
+;*****************************************************************************************
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;	ORG statements should use predefined labels rather than literal values.
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+
+
+org	SUBROUTINES_ORG
+;*****************************************************************************************
+; Subroutines
+;*****************************************************************************************
+
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+; Function: send_byte
+; Send byte via serial port
+; INPUTS:
+;	w 	-	The byte to be sent via RS-232
+; OUTPUTS:
+; 	outputs the byte via RS-232
+;------------------------------------------------------------------------------
+sendByte	mov	localTemp0,w
+    		bank    rs232TxBank
+
+:wait        	test    rs232TxCount                ;wait for not busy
+		sz
+		jmp	:wait                   ;
+
+		not     w                       ;ready bits (inverse logic)
+		mov     rs232TxHigh,w               ; store data byte
+		setb    rs232TxLow.7                ; set up start bit
+		mov     w,#10			;1 start + 8 data + 1 stop bit
+		mov     rs232TxCount,w
+		retp                            ;leave and fix page bits
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+; Subroutine - Send string pointed to by address in W register
+; INPUTS:
+;	w	-	The address of a null-terminated string in program
+;			memory
+; OUTPUTS:
+; 	outputs the string via. RS-232
+;------------------------------------------------------------------------------
+sendString
+		bank	rs232TxBank
+ 		mov     localTemp1,w            ;store string address
+:loop
+		mov	w,#STRINGS_ORG>>8	; with indirect addressing
+		mov	m,w
+		mov     w,localTemp1            ;read next string character
+		iread                           ; using the mode register
+		test    w                       ;are we at the last char?
+		snz                             ;if not=0, skip ahead
+		jmp	:out                    ;yes, leave & fix page bits
+		call    sendByte               ;not 0, so send character
+		bank	rs232TxBank
+		inc     localTemp1              ;point to next character
+		jmp     :loop                   ;loop until done
+
+:out		mov	w,#$1F			;reset the mode register
+		mov	m,w
+		retp
+;------------------------------------------------------------------------------
+clearBank	; Clears an entire bank of RAM.
+		; To use, first load the FSR with the starting address 
+		; of the bank to clear.
+;--------------------------------------------------------------------------
+:loop
+	clr	indf
+	inc	fsr
+	mov	w,fsr
+	and	w,#%00001111
+	snz
+	retp
+	jmp	:loop
+;--------------------------------------------------------------------------
+delay_100n_ms
+; This subroutine delays 'w'*100 milliseconds. (not exactly, but pretty close)
+; This subroutine uses the TEMP register
+; INPUT		w	-	w/100 milliseconds to delay for.
+; OUTPUT	Returns after 100 * n milliseconds.
+;--------------------------------------------------------------------------
+	mov	localTemp0,w
+	bank	timerBank
+	mov	timerDiv,#48	; This loop delays for 100ms
+:loop	
+	mov	timer5ms,#-20	; delay 100ms
+	clrb	timerFlag	; clear the flag and
+	jnb	timerFlag,$	;   wait until the timer_flag is set.
+	decsz	localTemp0	; and do this w times.
+	jmp	:loop
+	retp
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;************************	     Page 2.5		***************************
+;*****************************************************************************************
+org	STRINGS_ORG		; This label defines where strings are kept in program space.
+;*****************************************************************************************
+;------------------------------------------------------------------------------
+; String Data
+;------------------------------------------------------------------------------
+;VP: RS232 Transmit
+
+
+_hello          dw      13,10,'Press any key to detect DTMF>',0
+_DTMFstring	dw	13,10,'DTMF>',0
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	; 	- Routines that use location-dependant data, such as in example below, should
+	;	  use a LABEL rather than a literal value as their input.  Example:
+	;	  instead of
+	;		mov     m,#3		 ; move upper nybble of address of strings into m
+	;	  use
+	;		mov	m,#STRINGS_ORG>>8; move upper nybble of address of strings into m
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+
+
+
+
+;*************************	     Page 3		**********************************
+;*****************************************************************************************
+org	DTMF_SUBS_ORG
+;*****************************************************************************************
+	tableStart
+
+dtmfGetValid	jmp	_dtmfGetValid
+
+	tableEnd
+;--------------------------------------------------------------------------
+ASCII_TABLE	; Ascii value at index (0-15)
+; INPUT:	w	-	Index into the table (0-15 value)
+; OUTPUT:	w	-	Constant at that index
+;--------------------------------------------------------------------------
+	tableStart
+		jmp	PC+w
+		retw	'1'
+		retw	'2'			
+		retw	'3'
+		retw	'A'
+		retw	'4'
+		retw	'5'	
+		retw	'6'
+		retw	'B'
+		retw	'7'
+		retw	'8'
+		retw	'9'
+		retw	'C'
+		retw	'*'
+		retw	'0'
+		retw	'#'
+		retw	'D'
+	tableEnd
+;--------------------------------------------------------------------------
+index_2_digit
+; This subroutine converts a digit from 0-9 or a '*' or a '#' to a table 
+; lookup index which can be used by the load_frequencies subroutine.  To use
+; this routine, pass it a value in the 'byte' register.  No invalid digits
+; are used. (A, B, C, or D)
+;--------------------------------------------------------------------------
+		call	ASCII_TABLE
+		retp
+;--------------------------------------------------------------------------
+SAMPLE
+; Get the result of one accumulation.  Store the result 
+; in result_1, result_2, result_3 and result_4
+; inputs:	before calling:
+;			- Disable PWM output
+;			- Set or clear the sample_lows bit
+; outputs:	These are affected:
+;			- ALL temporary globals are changed.
+;			- FSR is destroyed
+;			- calculated results of all accumulations
+;			  in the result registers.
+;			- w register returns an index to the winning frequency.
+;			  if no frequency won, wreg will = #4 (bit 2 set.)
+;			- high score in localTemp0 register
+;--------------------------------------------------------------------------
+	bank	dtmfSampleCount		; use isr_multiplex as a sample counter
+	mov	w,#low_samples		; if we are sampling low frequencies, take low_samples samples
+	sb	sampleLows		;
+	mov	w,#high_samples		; else take high_samples samples.
+	mov	dtmfSampleCount,w	; move this value from w
+	mov	fsr,#DTMF_CH_1		; point to DTMF channel 1's accumulators
+	call	@clearBank		; and clear it
+
+	clrb	dtmfDetectDone		; clear the dtmf_done indicator
+	setb	dtmfDetectEn		; enable DTMF detection
+	jnb	dtmfDetectDone,$	; wait until the accumulation cycle is finished.
+	
+	clrb	dtmfDetectEn		; disable DTMF Detection
+
+	mov	w,#sinAcc1Lo		; do the calculations on acc1
+	call	@dtmfDetectCalcs
+	bank	DTMF_CH_1
+	mov	result1,w		; and store result in result_1
+
+	mov	w,#sinAcc2Lo		; ditto for 2
+	call	@dtmfDetectCalcs
+	bank	DTMF_CH_1
+	mov	result2,w
+
+	mov	w,#sinAcc3Lo		; ditto
+	call	@dtmfDetectCalcs
+	bank	DTMF_CH_1
+	mov	result3,w
+
+	mov	w,#sinAcc4Lo		; ditto
+	call	@dtmfDetectCalcs
+	bank	DTMF_CH_1
+	mov	result4,w
+	
+	mov	w,#DTMF_CH_1		; point to DTMF_CH_1
+	
+	call	@dtmfGetWinner		; and get the winner in this bank.
+	mov	w,winnerIndex		; store the index to the winner in w.
+	retp
+;--------------------------------------------------------------------------
+absolute16	;	absolutes the 16-bit value passed to it
+		; inputs:	-pointer to the high_byte in w
+		; 		-must have wreg enabled in !option register
+		; outputs:	-absolute 16-bit value in passed pointer location
+		;		-FSR points to the high byte
+;--------------------------------------------------------------------------
+	mov	fsr,w
+	sb	indf.7		; return if high byte is positive
+	retp		
+	mov	w,indf		; else store high byte in w
+	not	w		; and negate w
+	dec	fsr		; point to low byte
+	not	indf		; 1's complement low byte
+	inc	indf		; and increment it
+	snz			
+	inc	wreg		; increment high byte if there was roll-over
+	inc	fsr		
+	mov	indf,w		; and store the new high-byte
+	retp
+;--------------------------------------------------------------------------
+scale16ByN	; Shifts right the 16-bit value passed to it by n bits
+ 		; If the MSByte is not equal to zero after the final shift,
+		; it is cleared and the lower byte is set to 255.
+		; inputs:	-#high_byte in FSR
+		;		-n= bits to shift right in w
+		;		-must have wreg enabled in !option register
+		; outputs:	-value shifted right n bits
+		;		-fsr = high_byte
+		; destroys:	-localTemp0
+;--------------------------------------------------------------------------
+	mov	localTemp0,w
+	mov	w,indf
+	clr	indf		; clear the upper byte since we want EVERYTHING in the lower byte
+	dec	fsr
+	test	localTemp0		; check the input variable for zero
+:loop
+	snz	
+	jmp	:done		; jump to :done if finished
+	clc
+	rr	wreg		; rotate the MSbyte right
+	rr	indf		; rotate the LSbyte right
+	dec	localTemp0		; decrement the counter
+	jmp	:loop
+:done
+	test	wreg		; test the upper byte for zero.
+	snz	
+	retp
+	mov	indf,#255	; if the upper byte was not = 0, make the lower byte = 255	
+	retp
+;--------------------------------------------------------------------------
+add16Plus16	; adds the 16-bit value pointed to by w to the location
+		; in w+2 and divides by two.
+		;
+		; inputs:	- #value_l in w
+		; outputs:	- the location in memory passed in w is added
+		;		  the next contiguous 16 bits and the result
+		;		  is stored in the next contiguous 16 bits.
+		;		  The result is divided by two to keep in range.
+		;		- fsr = value2_h
+;--------------------------------------------------------------------------
+	clrb	neg
+	mov	fsr,w		; indf = value_l
+	mov	w,indf
+	inc	fsr		; indf = value_h
+	inc	fsr		; indf = value2_l
+	add	indf,w
+	dec	fsr		; indf = value_h
+	mov	w,indf		
+	inc	fsr		; indf = value2_l
+	inc	fsr		; indf = value2_h
+	snc
+	inc	indf
+	snz
+	setb	neg		; indicate the rollover
+	add	indf,w
+	snb	neg		; if there was a roll-over, set the carry bit
+	stc
+	rr	indf		; divide by two to keep in range.
+	dec	fsr
+	rr	indf
+	inc	fsr		; divide by two to keep in range.
+	retp
+;--------------------------------------------------------------------------
+Multiply8x8 ; Multiply W by input
+;	INPUTS:		W * input
+;	OUTPUTS: 	16-bit output value in b_l and b_h
+;--------------------------------------------------------------------------
+	clr	loopCount
+	setb	loopCount.3	; move 8 to loop_count without affecting w
+	clr	bLo	;1
+	clr	bHi	;1 ;3
+:loop
+	clc			;1
+	snb	input.0	;1
+	add	bHi,w	;1
+	rr	bHi	;1
+	rr	bLo	;1
+	rr	input		;1
+	decsz	loopCount	;1
+	jmp	:loop		;3	10=looptime (78 on exit)
+				;    	78 + 3 = 81
+	retp			;3	82 + 3 = 84	ALWAYS!!!
+				;	for 16 bit result.
+;--------------------------------------------------------------------------
+;	SQ_ROOT 		; By John Keenan
+;	Routine to take the square root of a 16 bit unsigned number
+;	entry: 	b_l - low byte of number
+;		b_h - high byte of number
+;	exit:	W register returns 8 bit result
+;--------------------------------------------------------------------------
+
+sqRoot16	mov	rootMask,#$c0		; initialise root_mask
+		mov	w,#$40			; initialise answer
+:sq1		stc
+		sub	bHi,w		; subtract the root develped so far
+		sc				; restore subtraction if carry cleared
+		jmp	:sq5
+:sq2		or	w,rootMask		; set the current bit
+:sq3		nop
+		rl	bLo			; shift number left one position
+		rl	bHi
+		rr	rootMask		; picks up ms bit of input2
+		snb	rootMask.7
+		jmp	:sq6
+		xor	w,rootMask		; append 01 to the root developed so far
+		sc				; if the lsb of root_mask was shifted into carry,
+		jmp	:sq1			; then we're done. Otherwise loop again
+		stc
+		sub	bHi,w			; 
+		sc
+		retp
+		snz
+		snb	bLo.7
+		xor	w,#1
+		retp
+:sq6		snc
+		retp
+		clrb	rootMask.7
+		xor	w,rootMask
+		stc
+		sub	bHi,w
+		jmp	:sq2
+:sq5		add	bHi,w		; carry=0 here
+		jmp	:sq3
+;--------------------------------------------------------------------------
+dtmfDetectCalcs		;	         _____________
+			; OUTPUT = W = \/(a^2) + (b^2) 
+			; Do all processing for DTMF detection, using FSR
+			; as index into the bank to process in w register
+			; output result of this calculation in the w register
+;--------------------------------------------------------------------------
+	mov	localTemp1,w
+	call	absoluteScaleAndSquare	
+				; a = a^2
+	bank	mathBank	
+	mov	aLo,bLo		; store result in a
+	mov	aHi,bHi
+	inc	localTemp1	; increment pointer to register location
+	inc	localTemp1
+	mov	w,localTemp1		
+	call	absoluteScaleAndSquare
+				; b = b^2
+
+	mov	w,#aLo		; now add a^2 and b^2
+
+	call	add16plus16	; result in b_l and b_h
+				; y = a^2 + b^2
+
+	call	sqRoot16	; and get the square root of the result.
+				; result returned in w register.
+				;	_____________
+				; y = \/(a^2) + (b^2)
+	retp			; return with result in w register
+	
+;--------------------------------------------------------------------------
+absoluteScaleAndSquare
+			; absolute, scale, and square the 16-bit value pointed
+			; to by the w register.  Results are in b_l and b_h of
+			; of the math bank
+;--------------------------------------------------------------------------
+	mov	fsr,w
+	mov	localTemp2,indf	; and store value at this location in localTemp2
+	inc	fsr		; get the high byte
+	mov	w,indf		; and move it to w
+	bank	mathBank
+	mov	bHi,w		; store high byte in bHi
+	mov	bLo,localTemp2	; store low byte in bLo
+	mov	w,#bHi		; w-->b_h
+	call	absolute16	; absolute b 
+	mov	w,#scaling_factor
+				; and shift b right by scaling_factor
+	call	scale16byN	;
+	mov	w,bLo
+	mov	input,w
+	call	Multiply8x8	; square b
+	retp			; return with result in b_l and b_h
+;--------------------------------------------------------------------------
+checkPowers		; ensure that the high power and low power are within
+			; 1.5 of each other.
+			; disable this increase sensitivity to DTMF digits.
+			; INPUTS:  high_freq_power and low_freq_power are
+			;	   already loaded with their corresponding
+			;	   results from the last sample period.
+			; OUTPUTS: Returns with 0 in the W register if the values
+			; 	   are within 1.5 of each other, and $ff if they
+			;	   are not.
+;--------------------------------------------------------------------------
+	bank	refBank
+	cja	highFreqPower,lowFreqPower,:high_higher
+:low_higher
+	mov	localTemp0,highFreqPower
+	mov	localTemp1,lowFreqPower
+	jmp	:compare
+:high_higher
+	mov	localTemp1,highFreqPower
+	mov	localTemp0,lowFreqPower
+:compare
+	mov	w,localTemp0
+	clc
+	rr	wreg
+
+
+	add	localTemp0,w		; = (1.5 * high_freq_power) might overflow
+	rr	localTemp0		; = (1.5 * high_freq_power)/2 in case of overflow
+	clc
+	rr	localTemp1		; = (low_freq_power/2) to make it fair.
+	cja	localTemp1,localTemp0,:invalid ; if 1.5 * the lower power is not greater
+				    ; than or equal to the higher power, this is invalid
+:valid
+	clr	w
+	retp
+:invalid
+	mov	w,#$ff
+	retp	
+;--------------------------------------------------------------------------
+dtmfGetWinner	; Compare the 4 frequencies and find the winner and 
+		; runner-up.  Pre-load the high-score to create a threshold.
+		; The winner must be at least 2 times larger than the threshold
+		; or than the next highest score, whichever is larger.
+		; INPUTS:  Load a pointer to the first result register into W
+		; OUTPUTS: - high_score, runner_up_score indicate power present
+		;	     at each frequency
+		;	   - W holds an index to the winning result.  
+		;	     W = 4 if no result was valid.
+;--------------------------------------------------------------------------
+	mov	fsr,w
+	mov	highScore,#minimum_score	; 80 is the score to beat
+	clr	runnerUpScore		
+	mov	winnerIndex,#4			; if this is still 4 at the end, then nothing beat the high score.
+
+	clr	localTemp0			; clear the index
+
+:loop
+	cjb	indf,highScore,:check_runner_up
+						; check if the result is higher than the high score
+						; if yes, save the result.
+	mov	runnerUpIndex,winnerIndex	; save the runner-up
+	mov	runnerUpScore,highScore
+	mov	winnerIndex,localTemp0		; save the winner and new high score
+	mov	highScore,indf
+	jmp	:next
+
+:check_runner_up
+	cjb	indf,runnerUpScore,:next
+	mov	runnerUpScore,indf		; this one beat the runner-up
+	mov	runnerUpIndex,localTemp0
+:next
+	inc	fsr				; point to the next result
+	inc	localTemp0			; and increment the register
+	sb	localTemp0.2			; if localTemp0.2 is set, we are done. (we've done 4 results)
+	jmp	:loop
+	mov	w,runnerUpScore			; multiply the runner-up by 2.
+
+	add	runnerUpScore,w			; winner's score must be 2 times larger than the runner up to win.
+	jc	:invalid			; if carry, the high score must be invalid.
+;	add	runnerUpScore,w		
+;	jc	:invalid			; if carry, the high score must be invalid.
+	mov	localTemp0,highScore			; store the high score
+	csb	highScore,runnerUpScore		; and return if the high score is above or equal to the (runner_up_score * 3)
+	retp	
+:invalid
+
+	mov	w,#4				; else move 4 into the winner index
+	mov	winnerIndex,w			; to indicate that nothing won.
+	retp
+
+;--------------------------------------------------------------------------
+_dtmfGetValid
+; This routine waits for a valid DTMF digit, followed by silence.  Once 
+; a valid DTMF digit followed by silence is found, 
+;--------------------------------------------------------------------------
+
+:getHighFrequencies			; wait until a valid high frequency comes in.
+	clrb	sampleLows
+	call	@SAMPLE
+	jb	wreg.2,:getHighFrequencies	; if invalid, start over
+	bank	refBank
+	mov	highFreqIndex,w		; store result in the high_frequency storage register
+
+
+:redo_high_frequencies			; now check it to make sure it is still the
+					; same frequency.
+	call	@SAMPLE
+	jb	wreg.2,:getHighFrequencies	; if invalid, start over
+	bank	refBank
+	xor	w,highFreqIndex		; compare with result in the high_frequency storage register
+	snz
+	jmp	:get_low_frequencies	; if valid but not equal to previous result, re-try.
+	xor	highFreqIndex,w		; restore previous value of w register (before xor)
+					; and store in high_frequency index
+	jmp	:redo_high_frequencies
+
+
+:get_low_frequencies			; now get the low frequency component
+	mov	highFreqPower,localTemp0; store the power in the high frequency
+	setb	sampleLows
+	call	@SAMPLE
+	jb	wreg.2,:getHighFrequencies	; if invalid, start over
+	bank	refBank
+	mov	lowFreqIndex,w		; store result in the high_frequency storage register
+	mov	lowFreqPower,localTemp0	; store the power in the high frequency
+	call	@checkPowers
+	jb	wreg.2,:getHighFrequencies
+
+
+
+:get_silence				; if valid up to this point, wait until there is silence
+					; before returning
+	clrb	sampleLows
+	call	@SAMPLE
+	jnb	wreg.2,:get_silence
+	
+
+
+	bank	refBank
+	clc
+	mov	w,<<lowFreqIndex	; create the index to the valid digit
+	rl	wreg
+	or	w,highFreqIndex
+	mov	dtmfDigitIndex,w	; and save it
+
+
+	retp
+;--------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;*****************************************************************************************
+org	MAIN_PROGRAM_ORG
+;*****************************************************************************************
+
+
+
+;------------------------------------------------------------------------------
+; RESET VECTOR 
+;------------------------------------------------------------------------------
+
+	;------------------------------------------------------------------------------
+	; Program execution begins here on power-up or after a reset
+	;------------------------------------------------------------------------------
+
+_resetEntry		
+	;------------------------------------------------------------------------------
+	; Initialize all port configuration
+	;------------------------------------------------------------------------------
+
+		_mode	ST_W			;point MODE to write ST register
+		mov     w,#RB_ST            	;Setup RB Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_ST            	;Setup RC Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_ST            	;Setup RD Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_ST            	;Setup RE Schmitt Trigger, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	LVL_W			;point MODE to write LVL register
+		mov     w,#RA_LVL            	;Setup RA CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!ra,w		 
+		mov     w,#RB_LVL            	;Setup RB CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rb,w		
+		mov     w,#RC_LVL            	;Setup RC CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_LVL            	;Setup RD CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!rd,w		
+		mov     w,#RE_LVL            	;Setup RE CMOS or TTL levels, 0 = TTL, 1 = CMOS
+		mov	!re,w		
+ENDIF
+		_mode	PLP_W			;point MODE to write PLP register
+		mov     w,#RA_PLP            	;Setup RA Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!ra,w		 
+		mov     w,#RB_PLP            	;Setup RB Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rb,w		
+		mov     w,#RC_PLP            	;Setup RC Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rc,w	
+IFDEF SX48_52
+		mov     w,#RD_PLP            	;Setup RD Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!rd,w		
+		mov     w,#RE_PLP            	;Setup RE Weak Pull-up, 0 = enabled, 1 = disabled
+		mov	!re,w		
+ENDIF
+		_mode	DDIR_W			;point MODE to write DDIR register
+		mov	w,#RA_DDIR		;Setup RA Direction register, 0 = output, 1 = input		
+		mov	!ra,w	
+		mov	w,#RB_DDIR		;Setup RB Direction register, 0 = output, 1 = input
+		mov	!rb,w			
+		mov	w,#RC_DDIR		;Setup RC Direction register, 0 = output, 1 = input
+		mov	!rc,w			
+IFDEF SX48_52
+		mov	w,#RD_DDIR		;Setup RD Direction register, 0 = output, 1 = input
+		mov	!rd,w			
+		mov	w,#RE_DDIR		;Setup RE Direction register, 0 = output, 1 = input
+		mov	!re,w			
+ENDIF
+		mov     w,#RA_latch          	;Initialize RA data latch
+		mov     ra,w		
+		mov     w,#RB_latch         	;Initialize RB data latch
+		mov     rb,w		
+		mov     w,#RC_latch          	;Initialize RC data latch
+		mov     rc,w		
+IFDEF SX48_52
+		mov     w,#RD_latch         	;Initialize RD data latch
+		mov     rd,w			
+		mov     w,#RE_latch         	;Initialize RE data latch
+		mov     re,w			
+ENDIF
+
+
+	;------------------------------------------------------------------------------
+	; Clear all Data RAM locations
+	;------------------------------------------------------------------------------
+
+zeroRam
+IFDEF SX48_52   				;SX48/52 RAM clear routine
+		mov	w,#$0a			;reset all ram starting at $0A
+		mov	fsr,w
+:zeroRam	clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zeroRam
+
+		bank	bank0			;clear bank 0 registers
+		clr	$10
+		clr	$11
+		clr	$12
+		clr	$13
+		clr	$14
+		clr	$15
+		clr	$16
+		clr	$17
+		clr	$18
+		clr	$19
+		clr	$1a
+		clr	$1b
+		clr	$1c
+		clr	$1d
+		clr	$1e
+		clr	$1f
+
+ELSE     					;SX18/20/28 RAM clear routine
+		clr	fsr			;reset all ram banks
+:zeroRam	sb	fsr.4			;are we on low half of bank?
+		setb	fsr.3			;If so, don't touch regs 0-7
+		clr	ind			;clear using indirect addressing
+		incsz	fsr			;repeat until done
+		jmp	:zeroRam
+ENDIF
+	;------------------------------------------------------------------------------
+	; Initialize program/VP registers
+	;------------------------------------------------------------------------------
+
+		bank	rs232TxBank		; Select the bank
+		mov	w,#UART1_Divide		;load initial UART baud rate
+		mov	rs232TxDivide,w		; 
+
+	;------------------------------------------------------------------------------
+	; Setup and enable RTCC interrupt, WREG register, RTCC/WDT prescaler
+	;------------------------------------------------------------------------------
+
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+	; Virtual Peripheral Guidelines Tip:
+	;
+	;	The suggested default values for the option register are:
+	;	- Bit 7 set to 0: location $01 addresses the W register (WREG
+	;	- Bit 5 set to 1: RTCC increments on internal transitions
+	;	- Bit 3 set to 1: Prescaler assigned to WatchDog Timer
+	;
+	;	If a routine must change the value of the option register (for example, to access
+	;	the RTCC register directly), then it should restore the default value for the 
+	;	option register before exiting.
+	;
+	;?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?!?
+
+
+RTCC_ON		=	%10000000	;Enables RTCC at address $01 (RTW hi)
+					;*WREG at address $01 (RTW lo) by default
+RTCC_ID		=	%01000000	;Disables RTCC edge interrupt (RTE_IE hi)
+					;*RTCC edge interrupt (RTE_IE lo) enabled by default
+RTCC_INC_EXT	=	%00100000	;Sets RTCC increment on RTCC pin transition (RTS hi)
+					;*RTCC increment on internal instruction (RTS lo) is default
+RTCC_FE		=	%00010000	;Sets RTCC to increment on falling edge (RTE_ES hi)
+					;*RTCC to increment on rising edge (RTE_ES lo) is default
+RTCC_PS_ON	=	%00000000	;Assigns prescaler to RTCC (PSA lo)
+RTCC_PS_OFF	=	%00001000	;Assigns prescaler to WDT (PSA lo)
+PS_000		=	%00000000	;RTCC = 1:2, WDT = 1:1
+PS_001		=	%00000001	;RTCC = 1:4, WDT = 1:2
+PS_010		=	%00000010	;RTCC = 1:8, WDT = 1:4
+PS_011		=	%00000011	;RTCC = 1:16, WDT = 1:8
+PS_100		=	%00000100	;RTCC = 1:32, WDT = 1:16
+PS_101		=	%00000101	;RTCC = 1:64, WDT = 1:32
+PS_110		=	%00000110	;RTCC = 1:128, WDT = 1:64
+PS_111		=	%00000111	;RTCC = 1:256, WDT = 1:128
+
+OPTIONSETUP	equ	PS_010	; the default option setup for this program.
+		mov	w,#OPTIONSETUP		; setup option register for RTCC interrupts enabled 
+		mov	!option,w		; and no prescaler.
+		jmp	@mainLoop
+
+;------------------------------------------------------------------------------
+; MAIN PROGRAM CODE 
+;------------------------------------------------------------------------------
+
+mainLoop
+	mov	w,#_hello			; Send out string.
+	call	@sendString
+
+	jb	rs232RxPin,$			; Wait for the rxPin to go low (start bit)
+	mov	w,#_DTMFstring
+	call	@sendString
+	
+	clrb	hook			; go off hook
+	mov	w,#10
+	call	@delay_100n_ms		; delay 1s.
+
+:dtmfLoop
+	call	@dtmfGetValid		; Wait for a valid DTMF digit
+	bank	refBank
+	mov	w,dtmfDigitIndex	; Get the ASCII equivalent
+	call	@index_2_digit		
+	call	@sendByte		; Send it
+	jmp	:dtmfLoop		; get another digit
+
+
+
+
+
+
+
+
+;*****************************************************************************************
+END		;End of program code
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
+;*****************************************************************************************
